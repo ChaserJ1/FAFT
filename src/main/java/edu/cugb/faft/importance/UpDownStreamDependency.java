@@ -119,7 +119,7 @@ public class UpDownStreamDependency {
      * 考虑路径长度的衰减效应，距离越远影响越小
      * 衰减公式：impact = α^depth，其中α是衰减因子，depth是路径长度
      */
-    private void computeDecayImpactScores() {
+    public void computeDecayImpactScores() {
         decayImpactScore = new HashMap<>();
 
         // 对每个节点进行BFS遍历计算衰减影响
@@ -155,7 +155,7 @@ public class UpDownStreamDependency {
      * 打印所有节点的重要性评分结果
      * 包括：上游节点数、下游节点数、可达性大小、总路径长度和衰减影响分数
      */
-    private void printNodeImportanceScores() {
+    public void printNodeImportanceScores() {
         System.out.println("Node USDependency Scores:");
         for (String node : graph.keySet()) {
             System.out.printf("Node: %-10s | Up: %2d | Down: %2d | Reach: %2d | PathSum: %2d | DecayImpact: %.3f%n",

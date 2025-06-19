@@ -3,11 +3,9 @@ package edu.cugb.faft.importance;
 
 
 import edu.cugb.faft.pojo.OperatorInfo;
-import lombok.Data;
 
 import java.util.*;
 
-@Data
 public class NodeImportanceEvaluator {
 
     private final double alpha;  // 输出影响度权重
@@ -29,10 +27,11 @@ public class NodeImportanceEvaluator {
     public Map<String, Double> computeImportance(Map<String, List<String>> dag,
                                                  Map<String, OperatorInfo> operatorResources) {
         // 1. 三个独立指标
+        // 输出影响度
         Map<String, Integer> outputImpact = OutputImpact.computeOutputImpact(dag);
-        // 待实现
+        // 上下游依赖
         Map<String, Double> dependencyWeight;
-
+        // 计算复杂度
         Map<String, Double> complexityMap = new HashMap<>();
 
         for (Map.Entry<String, OperatorInfo> entry : operatorResources.entrySet()) {

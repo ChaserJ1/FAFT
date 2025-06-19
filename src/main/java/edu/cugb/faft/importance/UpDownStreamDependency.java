@@ -23,7 +23,7 @@ public class UpDownStreamDependency {
 
     /**
      * 构造函数，初始化图结构
-     * @param graph 图的邻接表表示，键为节点ID，值为该节点指向的节点列表
+     * @param graph 图的邻接表表示，键为节点 id，值为该节点指向的节点列表
      */
     public UpDownStreamDependency(Map<String, List<String>> graph) {
         this.graph = graph;

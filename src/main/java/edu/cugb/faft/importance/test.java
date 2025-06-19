@@ -8,7 +8,7 @@ import java.util.*;
  */
 public class test {
     public static void main(String[] args) {
-        Map<String, List<String>> dag = new HashMap<>();
+        Map<String, List<String>> dag = new LinkedHashMap<>();
         dag.put("Source1", List.of("A"));
         dag.put("A", List.of("B", "C"));
         dag.put("B", List.of("Sink"));
@@ -16,7 +16,11 @@ public class test {
         dag.put("D", List.of("Sink"));
         dag.put("Sink", new ArrayList<>());
 
-        NodeImportanceEvaluator evaluator = new NodeImportanceEvaluator(dag);
+        UpDownStreamDependency evaluator = new UpDownStreamDependency(dag);
         evaluator.evaluate();
+        Map<String, Integer> impactMap = OutputImpact.computeOutputImpact(dag);
+        for (Map.Entry<String, Integer> entry : impactMap.entrySet()) {
+            System.out.printf("Node: %-10s | OutputImpact: %d%n", entry.getKey(), entry.getValue());
+        }
     }
 }

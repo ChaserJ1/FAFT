@@ -21,6 +21,7 @@ public class test {
         Map<String, Integer> impactMap = OutputImpact.computeOutputImpact(dag);
         for (Map.Entry<String, Integer> entry : impactMap.entrySet()) {
             System.out.printf("Node: %-10s | OutputImpact: %d%n", entry.getKey(), entry.getValue());
+            System.out.println("Node: %-10s | ComputeComplexity: %d%n",);
         }
     }
 }

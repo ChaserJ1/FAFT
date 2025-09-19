@@ -6,13 +6,27 @@
 
     <groupId>edu.cugb</groupId>
     <artifactId>FAFT</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0</version>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
+        <spring.boot.version>3.3.2</spring.boot.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
+
+    <dependencies>
+        <!-- Apache Storm核心依赖 -->
+        <dependency>
+            <groupId>org.apache.storm</groupId>
+            <artifactId>storm-core</artifactId>
+            <version>2.8.0</version> <!-- 或 2.x 最新稳定版本 -->
+            <scope>provided</scope>
+        </dependency>
+
+    </dependencies>
+
+
 
 
 </project>

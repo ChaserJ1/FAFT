@@ -167,4 +167,23 @@ public class UpDownStreamDependency {
                     decayImpactScore.get(node));
         }
     }
+
+
+    /**
+     * 计算每个节点的总和“依赖权重”
+     * @return
+     */
+    public Map<String, Double> getDependencyScore() {
+        Map<String, Double> scoreMap = new HashMap<>();
+        // 简单加权：上游数量 + 下游数量 + 衰减影响分数
+        // 这里可以根据需求调整权重系数
+        for (String node : graph.keySet()) {
+            double score = 0.4 * upstreamCount.getOrDefault(node, 0)
+                         + 0.4 * downstreamCount.getOrDefault(node, 0)
+                         + 0.2 * decayImpactScore.getOrDefault(node, 0.0);
+            scoreMap.put(node, score);
+        }
+        return scoreMap;
+    }
+
 }

@@ -30,7 +30,10 @@ public class NodeImportanceEvaluator {
         // 输出影响度
         Map<String, Integer> outputImpact = OutputImpact.computeOutputImpact(dag);
         // 上下游依赖
-        Map<String, Double> dependencyWeight;
+        UpDownStreamDependency dependency = new UpDownStreamDependency(dag);
+        dependency.evaluate();
+        Map<String, Double> dependencyWeight = dependency.getDependencyScore();
+
         // 计算复杂度
         Map<String, Double> complexityMap = new HashMap<>();
 
@@ -42,7 +45,7 @@ public class NodeImportanceEvaluator {
 
         // 2. 归一化每个指标
         Map<String, Double> normImpact = normalize(outputImpact);
-        Map<String, Double> normDep = normalize(null);
+        Map<String, Double> normDep = normalize(dependencyWeight);
         Map<String, Double> normComplexity = normalize(complexityMap);
 
         // 3. 综合打分

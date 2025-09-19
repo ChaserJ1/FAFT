@@ -1,11 +1,11 @@
 package edu.cugb.faft.topology;
 
-import edu.cugb.faft.importance.NodeImportanceEvaluator;
 import edu.cugb.faft.manager.ApproxBackupManager;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
 import org.apache.storm.topology.base.BaseRichBolt;
+import org.apache.storm.tuple.Fields;
 import org.apache.storm.tuple.Tuple;
 import org.apache.storm.tuple.Values;
 
@@ -18,44 +18,34 @@ public class FaftCountBolt extends BaseRichBolt {
     private ApproxBackupManager backupManager;
 
     @Override
-    public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
+    public void prepare(Map<String, Object> topoConf, TopologyContext context,
+                        OutputCollector collector) {
         this.collector = collector;
         this.counts = new HashMap<>();
-        this.backupManager = new ApproxBackupManager("count-bolt");
+
+        // 初始化 ApproxBackupManager（单例）
+        double initRatio = 0.5; // 简化版写死，完整版会来自算子权重
+        double min = 0.1, max = 1.0, step = 0.1;
+        this.backupManager = ApproxBackupManager.init(initRatio, min, max, step);
     }
 
     @Override
-    public void execute(Tuple input) {
-        String word = input.getStringByField("filteredWord");
+    public void execute(Tuple tuple) {
+        String word = tuple.getStringByField("filteredWord");
+        int count = counts.getOrDefault(word, 0) + 1;
+        counts.put(word, count);
 
-        // 更新单词的累计次数
-        counts.put(word, counts.getOrDefault(word, 0) + 1);
+        // 发射到下游
+        collector.emit(new Values(word, count));
 
-        // 当前单词的累计次数
-        int currentCount = counts.get(word);
-
-        // 全局 tuple 总数（所有单词的累计和）
-        int totalTuples = counts.values().stream().mapToInt(Integer::intValue).sum();
-
-        // 发射结果
-        collector.emit(new Values(word, counts.get(word)));
-        collector.ack(input);
-
-        // 调用近似备份（根据算子权重调整采样率）
+        // 尝试近似备份
         backupManager.tryBackup(new HashMap<>(counts));
 
-        // 打印日志：包含单词累计值、总tuple数和采样率
-        System.out.printf("[FAFT Count] Word: %-10s | Count: %d | TotalTuples: %d | CurrentRatio=%.2f%n",
-                word, currentCount, totalTuples, backupManager.getCurrentRatio());
-
-        // 每处理 100 个 tuple 打印一次状态统计
-        if (counts.values().stream().mapToInt(Integer::intValue).sum() % 100 == 0) {
-            backupManager.printStats();
-        }
+        collector.ack(tuple);
     }
 
     @Override
     public void declareOutputFields(OutputFieldsDeclarer declarer) {
-        declarer.declare(new org.apache.storm.tuple.Fields("word", "count"));
+        declarer.declare(new Fields("word", "count"));
     }
 }

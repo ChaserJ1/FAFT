@@ -1,0 +1,17 @@
+faft:
+  # 重要性系数 I(v) = alpha*O + beta*D + gamma*C
+  alpha: 0.34
+  beta: 0.33
+  gamma: 0.33
+
+  # 采样率上下限与步长
+  rmin: 0.10
+  rmax: 1.00
+  step: 0.05
+
+  # 误差阈值
+  error-threshold: 0.05
+
+  # 结构依赖的衰减参数（用于 UpDownStreamDependency / OutputImpact）
+  decay-alpha: 0.9 # 用于 D(v)
+  impact-delta: 0.9 # 用于 O(v)

@@ -10,16 +10,19 @@ import org.apache.storm.tuple.Values;
 
 import java.util.Map;
 
+/**
+ * 句子 → 单词 的拆分算子
+ * 输入字段：sentence
+ * 输出字段：word
+ */
 public class SplitBolt extends BaseRichBolt {
     private OutputCollector collector;
 
-    @Override
-    public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
+    @Override public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
         this.collector = collector;
     }
 
-    @Override
-    public void execute(Tuple input) {
+    @Override public void execute(Tuple input) {
         String sentence = input.getStringByField("sentence");
         for (String word : sentence.split(" ")) {
             collector.emit(input, new Values(word));
@@ -27,8 +30,7 @@ public class SplitBolt extends BaseRichBolt {
         collector.ack(input);
     }
 
-    @Override
-    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+    @Override public void declareOutputFields(OutputFieldsDeclarer declarer) {
         declarer.declare(new Fields("word"));
     }
 }

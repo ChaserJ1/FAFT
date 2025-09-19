@@ -1,92 +1,91 @@
 package edu.cugb.faft.manager;
 
+import java.util.Map;
 import java.util.Random;
 
 /**
  * ApproxBackupManager
- *
- * 该类用于管理算子的近似备份逻辑，核心思想是通过采样率（backupRatio）控制状态是否被备份，
- * 并根据误差反馈动态调整采样率，从而在保证用户定义的误差阈值前提下减少备份开销。
+ * 近似备份管理器，用于管理算子状态的采样式备份
+ * - 提供 tryBackup() 方法：基于当前采样率决定是否进行备份
+ * - 提供 adjustByError() 方法：根据误差反馈动态调节采样率
+ * - 提供统计功能，方便在日志中观察采样率变化和备份触发情况
  */
 public class ApproxBackupManager {
-    private final String operatorId;    // 算子 ID，用于标识日志输出
-    private double backupRatio;         // 当前采样率（0.0 ~ 1.0）
-    private final double minRatio;      // 最小采样率（避免过低）
-    private final double maxRatio;      // 最大采样率（避免过高）
-    private final double step;          // 每次调整的步长
-    private final Random random;        // 随机数生成器，用于采样
 
-    // 统计指标
-    private int backupCount;            // 执行过的备份次数
-    private int tupleCount;             // 处理过的 tuple 总数
+    private static ApproxBackupManager instance;   // 单例模式（保证所有 Bolt 共享采样率状态）
 
-    /**
-     * 构造函数（默认参数版本）
-     * 初始采样率 0.5，最小 0.1，最大 1.0，步长 0.1
-     */
-    public ApproxBackupManager(String operatorId) {
-        this(operatorId, 0.5, 0.1, 1.0, 0.1);
-    }
+    private double currentRatio;   // 当前采样率
+    private final double minRatio; // 最小采样率
+    private final double maxRatio; // 最大采样率
+    private final double step;     // 每次调节的步长
+    private final Random random;
+
+    private long processedCount;   // 已处理的 tuple 数量
+    private long backupCount;      // 实际执行备份的次数
 
     /**
-     * 构造函数（自定义参数版本）
-     * @param operatorId 算子 ID
-     * @param initRatio 初始采样率
-     * @param minRatio 最小采样率
-     * @param maxRatio 最大采样率
-     * @param step 调整步长
+     * 构造函数（仅内部使用，外部统一用 getInstance() 获取）
      */
-    public ApproxBackupManager(String operatorId, double initRatio,
-                               double minRatio, double maxRatio, double step) {
-        this.operatorId = operatorId;
-        this.backupRatio = initRatio;
+    private ApproxBackupManager(double initRatio, double minRatio, double maxRatio, double step) {
+        this.currentRatio = initRatio;
         this.minRatio = minRatio;
         this.maxRatio = maxRatio;
         this.step = step;
         this.random = new Random();
+        this.processedCount = 0;
+        this.backupCount = 0;
     }
 
     /**
-     * 尝试执行一次采样式备份
-     * @param state 算子的状态对象
+     * 单例模式初始化（第一次调用时传入配置参数）
      */
-    public void tryBackup(Object state) {
-        tupleCount++;  // 累计处理的 tuple 数量
-        if (random.nextDouble() < backupRatio) {  // 根据采样率决定是否备份
+    public static synchronized ApproxBackupManager init(double initRatio, double minRatio, double maxRatio, double step) {
+        if (instance == null) {
+            instance = new ApproxBackupManager(initRatio, minRatio, maxRatio, step);
+        }
+        return instance;
+    }
+
+    /**
+     * 获取单例
+     */
+    public static ApproxBackupManager getInstance() {
+        if (instance == null) {
+            throw new IllegalStateException("ApproxBackupManager 未初始化，请先调用 init()");
+        }
+        return instance;
+    }
+
+    /**
+     * 尝试进行一次采样式备份
+     * @param state 当前算子的状态（例如 word-count map）
+     */
+    public void tryBackup(Map<String, Integer> state) {
+        processedCount++;
+        if (random.nextDouble() < currentRatio) {
             backupCount++;
-            System.out.printf("[Backup] Operator=%s | Ratio=%.2f | State=%s%n",
-                    operatorId, backupRatio, state.toString());
+            // 实际备份逻辑（此处仅打印日志，实际可以写入文件或持久化存储）
+            System.out.printf("[FAFT Backup] Backup triggered | Ratio=%.2f | Processed=%d | Backups=%d%n",
+                    currentRatio, processedCount, backupCount);
         }
     }
 
     /**
-     * 增加采样率（通常在误差过高时调用）
+     * 根据误差反馈调整采样率
+     * @param estimatedError 当前估计的误差
+     * @param threshold      用户定义的误差阈值
      */
-    public void increaseBackupRatio() {
-        backupRatio = Math.min(maxRatio, backupRatio + step);
-        System.out.printf("[BackupManager] Operator=%s | Increased ratio -> %.2f%n",
-                operatorId, backupRatio);
-    }
-
-    /**
-     * 降低采样率（通常在误差过低或资源紧张时调用）
-     */
-    public void decreaseBackupRatio() {
-        backupRatio = Math.max(minRatio, backupRatio - step);
-        System.out.printf("[BackupManager] Operator=%s | Decreased ratio -> %.2f%n",
-                operatorId, backupRatio);
-    }
-
-    /**
-     * 根据实时误差动态调整采样率
-     * @param estimatedError 当前估计误差
-     * @param errorThreshold 用户定义的误差阈值
-     */
-    public void adjustByError(double estimatedError, double errorThreshold) {
-        if (estimatedError > errorThreshold) {
-            increaseBackupRatio();
-        } else if (estimatedError < errorThreshold / 2) {
-            decreaseBackupRatio();
+    public void adjustByError(double estimatedError, double threshold) {
+        if (estimatedError > threshold) {
+            // 误差超过阈值 → 提升采样率（增加容错能力）
+            currentRatio = Math.min(maxRatio, currentRatio + step);
+            System.out.printf("[FAFT Adjust] Error=%.4f > %.4f, Increase Ratio to %.2f%n",
+                    estimatedError, threshold, currentRatio);
+        } else if (estimatedError < threshold * 0.5) {
+            // 误差明显低于阈值 → 降低采样率（节省资源）
+            currentRatio = Math.max(minRatio, currentRatio - step);
+            System.out.printf("[FAFT Adjust] Error=%.4f < %.4f, Decrease Ratio to %.2f%n",
+                    estimatedError, threshold * 0.5, currentRatio);
         }
     }
 
@@ -94,14 +93,14 @@ public class ApproxBackupManager {
      * 获取当前采样率
      */
     public double getCurrentRatio() {
-        return backupRatio;
+        return currentRatio;
     }
 
     /**
-     * 打印当前的统计指标（便于在日志里观测）
+     * 打印统计信息（可在 Sink 或定时器中调用）
      */
     public void printStats() {
-        System.out.printf("[BackupStats] Operator=%s | Tuples=%d | Backups=%d | Ratio=%.2f%n",
-                operatorId, tupleCount, backupCount, backupRatio);
+        System.out.printf("[FAFT Stats] Processed=%d | Backups=%d | Ratio=%.2f%n",
+                processedCount, backupCount, currentRatio);
     }
 }

@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Random;
 
 public class FaftSinkBolt extends BaseRichBolt {
+    private OutputCollector collector;   // 用于 ack/fail
     private ApproxBackupManager backupManager;
     private final double ERROR_THRESHOLD = 0.05; // 简化版：误差阈值写死
     private final Random random = new Random();
@@ -20,9 +21,23 @@ public class FaftSinkBolt extends BaseRichBolt {
     @Override
     public void prepare(Map<String, Object> topoConf, TopologyContext context,
                         OutputCollector collector) {
+        this.collector = collector;
         this.result = new HashMap<>();
-        this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
+        try{
+            this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
+        }catch (IllegalStateException e){
+            // 如果还没初始化，则用默认参数兜底初始化一次
+            this.backupManager = ApproxBackupManager.init(
+                    0.5,   // 初始采样率
+                    0.1,   // 最小采样率
+                    1.0,   // 最大采样率
+                    0.05   // 步长
+            );
+        }
+
+
     }
+
 
     @Override
     public void execute(Tuple tuple) {
@@ -43,6 +58,8 @@ public class FaftSinkBolt extends BaseRichBolt {
         if (count % 10 == 0) {
             backupManager.printStats();
         }
+        collector.ack(tuple);
+
     }
 
     @Override

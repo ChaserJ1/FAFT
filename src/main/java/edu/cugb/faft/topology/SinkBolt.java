@@ -13,12 +13,16 @@ import java.util.Map;
  * 输入字段：word, count
  */
 public class SinkBolt extends BaseRichBolt {
-    @Override public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {}
+    private OutputCollector collector;
+    @Override public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
+        this.collector = collector;
+    }
 
-    @Override public void execute(Tuple input) {
-        String word = input.getStringByField("word");
-        int count = input.getIntegerByField("count");
+    @Override public void execute(Tuple tuple) {
+        String word = tuple.getStringByField("word");
+        int count = tuple.getIntegerByField("count");
         System.out.printf("[Default Sink] Word=%s | Count=%d%n", word, count);
+        collector.ack(tuple);
     }
 
     @Override public void declareOutputFields(OutputFieldsDeclarer declarer) {}

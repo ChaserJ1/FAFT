@@ -53,11 +53,11 @@ public class FaftTopologyLauncher {
         dag.put("faft-sink-bolt",  new ArrayList<>());
 
         // sinks
-        Set<String> sinks = new HashSet<>(List.of("faft-sink-bolt"));
+        List<String> sinkList = new ArrayList<>(List.of("faft-sink-bolt"));
 
         // 放入 conf，供各 bolt 读取并启动动态重算
         conf.put("faft.dag", dag);
-        conf.put("faft.sinks", sinks);
+        conf.put("faft.sinks", sinkList);
 
         // --- 2.2 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标） ---
         Map<String, OperatorInfo> infos = new HashMap<>();
@@ -73,6 +73,7 @@ public class FaftTopologyLauncher {
         double decayAlpha  = 0.9;   // 供 D(v) 衰减
         double rmin = 0.10, rmax = 1.00;
 
+        HashSet<String> sinks = new HashSet<>(sinkList);
         NodeImportanceEvaluator.Result res =
                 NodeImportanceEvaluator.evaluateAndAssignRatios(
                         dag, sinks, infos,

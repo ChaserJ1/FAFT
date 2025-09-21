@@ -47,7 +47,9 @@ public class FaftSinkBolt extends BaseRichBolt {
 
         // 2) 准备 DAG & sinks：优先从 conf 读取；没有就本地回退一份
         Map<String, List<String>> dag = (Map<String, List<String>>) topoConf.get("faft.dag");
-        Set<String> sinks = (Set<String>) topoConf.get("faft.sinks");
+        List<String> sinkList = (List<String>) topoConf.get("faft.sinks");
+        Set<String> sinks = new HashSet<>(sinkList);
+
         if (dag == null) {
             dag = new HashMap<>();
             dag.put("source-spout", List.of("split-bolt"));

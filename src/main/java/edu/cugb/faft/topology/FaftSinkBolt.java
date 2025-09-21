@@ -11,12 +11,16 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
+@SuppressWarnings("unchecked")
 public class FaftSinkBolt extends BaseRichBolt {
     private OutputCollector collector;   // 用于 ack/fail
     private ApproxBackupManager backupManager;
     private final double ERROR_THRESHOLD = 0.05; // 简化版：误差阈值写死
     private final Random random = new Random();
     private Map<String, Integer> result;
+
+    private String operatorId; // 记录该算子的 componentId，供按算子采样
+
 
     @Override
     public void prepare(Map<String, Object> topoConf, TopologyContext context,
@@ -34,6 +38,12 @@ public class FaftSinkBolt extends BaseRichBolt {
                     0.05   // 步长
             );
         }
+        // ★ 新增：从拓扑配置中接收“每算子采样率表”，并下发给管理器
+        Object ratios = topoConf.get("faft.ratios");
+        if (ratios instanceof Map) {
+            this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
+            System.out.println("[FAFT RatioUpdate] sink received ratios=" + ratios);
+        }
 
 
     }
@@ -48,7 +58,10 @@ public class FaftSinkBolt extends BaseRichBolt {
         // 简单日志输出
         System.out.printf("[FAFT Sink] Word=%s | Count=%d%n", word, count);
 
-        // 模拟误差（随机数）
+        // 对 Sink 的聚合态做一次“按算子”采样备份
+        backupManager.tryBackup(operatorId, new HashMap<>(result));
+
+        // 模拟误差（随机数），占位，之后换真实误差
         double estimatedError = random.nextDouble() * 0.1;
 
         // 根据误差调整采样率

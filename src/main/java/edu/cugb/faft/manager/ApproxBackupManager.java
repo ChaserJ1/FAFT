@@ -2,6 +2,7 @@ package edu.cugb.faft.manager;
 
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ApproxBackupManager
@@ -22,6 +23,8 @@ public class ApproxBackupManager {
 
     private long processedCount;   // 已处理的 tuple 数量
     private long backupCount;      // 实际执行备份的次数
+
+    private final Map<String,Double> ratioByOperator  = new ConcurrentHashMap<>();
 
     /**
      * 构造函数（仅内部使用，外部统一用 getInstance() 获取）
@@ -56,9 +59,17 @@ public class ApproxBackupManager {
         return instance;
     }
 
+    // 新增：批量更新每个算子的采样率
+    public synchronized void updateSamplingRatios(Map<String, Double> ratios) {
+        if (ratios == null || ratios.isEmpty()) return;
+        ratioByOperator.clear();
+        ratioByOperator.putAll(ratios);
+        System.out.printf("[FAFT RatioUpdate] %s%n", ratioByOperator);
+    }
+
     /**
      * 尝试进行一次采样式备份
-     * @param state 当前算子的状态（例如 word-count map）
+     * @param state 当前算子的状态
      */
     public void tryBackup(Map<String, Integer> state) {
         processedCount++;
@@ -67,6 +78,25 @@ public class ApproxBackupManager {
             // 实际备份逻辑（此处仅打印日志，实际可以写入文件或持久化存储）
             System.out.printf("[FAFT Backup] Backup triggered | Ratio=%.2f | Processed=%d | Backups=%d%n",
                     currentRatio, processedCount, backupCount);
+            // TODO: 后续可考虑写入磁盘，做持久化逻辑
+        }
+    }
+
+    // 新增重载：按算子进行采样式备份
+
+    /**
+     * 采样式备份2.0
+     * @param operatorId
+     * @param state
+     */
+    public void tryBackup(String operatorId, Map<String, Integer> state) {
+        processedCount++;
+        double r = getRatioFor(operatorId);
+        if (random.nextDouble() < r) {
+            backupCount++;
+            System.out.printf("[FAFT Backup] op=%s ratio=%.2f processed=%d backups=%d%n",
+                    operatorId, r, processedCount, backupCount);
+            // TODO: 真正的备份落盘/持久化逻辑
         }
     }
 
@@ -94,6 +124,17 @@ public class ApproxBackupManager {
      */
     public double getCurrentRatio() {
         return currentRatio;
+    }
+
+
+    /**
+     * 查询算子专属采样率（没有则回退到全局 currentRatio）
+     * @param operatorId
+     * @return
+     */
+    private double getRatioFor(String operatorId) {
+        if (operatorId == null) return currentRatio;
+        return ratioByOperator.getOrDefault(operatorId, currentRatio);
     }
 
     /**

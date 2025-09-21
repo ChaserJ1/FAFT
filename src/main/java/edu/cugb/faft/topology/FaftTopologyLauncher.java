@@ -86,7 +86,8 @@ public class FaftTopologyLauncher {
         // --- 2.4 下发到 Storm Config，供各 Bolt 在 prepare() 读取 ---
         Map<String, Double> ratios = res.R; // 每个算子的采样率
         System.out.println("[FAFT Init] ratios=" + ratios);
-        conf.put("faft.ratios", ratios);
+        conf.put("faft.ratios", ratios);    // 初试采样率
+        conf.put("faft.importance", res.I); // 初始重要性
 
         // 3. 根据运行模式提交
         if (args != null && args.length > 0) {

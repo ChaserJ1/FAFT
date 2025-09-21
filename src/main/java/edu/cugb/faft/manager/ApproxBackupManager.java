@@ -5,9 +5,15 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * 近似备份管理器（支持“按算子采样率 + 局部调节”）
+ * - ratioByOperator：每算子基准采样率（来自启动时评估/动态重算）
+ * - importanceMap  ：每算子重要性分数（来自评估器）
+ * - adjustByError  ：当误差超阈值时，仅对“重要算子 Top P%”做上调；当误差远低于阈值时，对“低重要性算子 Bottom P%”做温和下调
+ */
 public class ApproxBackupManager {
 
-    // ===== 单例 =====
+    //单例
     private static volatile ApproxBackupManager INSTANCE;
     public static synchronized ApproxBackupManager init(double initRatio, double rmin, double rmax, double step) {
         if (INSTANCE != null) return INSTANCE;
@@ -19,7 +25,7 @@ public class ApproxBackupManager {
         return INSTANCE;
     }
 
-    // ===== 配置与状态 =====
+    // 配置与状态
     private final Random random = new Random();
     private volatile double currentRatio;  // 旧的全局比例（兼容老接口）
     private final double step;             // 调整步长（用于全局缩放/老接口）
@@ -28,7 +34,10 @@ public class ApproxBackupManager {
     // 每算子的“基准 r(v)”表（启动/重算时更新）
     private final ConcurrentHashMap<String, Double> ratioByOperator = new ConcurrentHashMap<>();
 
-    // 叠加在“基准 r”上的全局缩放，用于误差闭环（让所有算子一起收/放）
+    // 每算子的“重要性分数”
+    private final ConcurrentHashMap<String, Double> importanceMap = new ConcurrentHashMap<>();
+
+    // 叠加在“基准 r”上的全局缩放，用于误差闭环（让所有算子一起收/放），已改为局部调节
     private volatile double globalScale = 1.0;
 
     // 统计：全局/每算子处理计数（TPS 差分用）
@@ -51,7 +60,7 @@ public class ApproxBackupManager {
         this.step = step;
     }
 
-    // ====== API：更新整张 per-op 采样率表 ======
+    // 更新整张 per-op 采样率表
     public synchronized void updateSamplingRatios(Map<String, Double> ratios) {
         if (ratios == null || ratios.isEmpty()) return;
         ratioByOperator.clear();
@@ -59,14 +68,11 @@ public class ApproxBackupManager {
         System.out.println("[FAFT RatioUpdate] " + ratioByOperator);
     }
 
-    // ====== 兼容：旧的全局版 tryBackup（不带 opId）======
-    public void tryBackup(Map<String, Integer> state) {
-        processedCount++;
-        if (random.nextDouble() < currentRatio) {
-            backupCount++;
-            System.out.printf("[FAFT Backup][GLOBAL] ratio=%.2f processed=%d backups=%d%n",
-                    currentRatio, processedCount, backupCount);
-        }
+    public synchronized void updateImportance(Map<String, Double> importance) {
+        if (importance == null || importance.isEmpty()) return;
+        importanceMap.clear();
+        importanceMap.putAll(importance);
+        System.out.println("[FAFT ImportanceUpdate] " + importanceMap);
     }
 
     // ====== 新的按算子 tryBackup（用 opId 查表）======
@@ -90,31 +96,45 @@ public class ApproxBackupManager {
     }
     private double clamp(double x) { return Math.max(rmin, Math.min(rmax, x)); }
 
-    // ====== 误差闭环：调整 globalScale，而非仅改 currentRatio ======
+    // 局部调节
     public synchronized void adjustByError(double Eobs, double Emax) {
         double lower = 0.5 * Emax;      // 滞回下界
         double s = Math.max(0.01, step); // 用 step 作为缩放步长，最低 1%
         if (Eobs > Emax) {
-            // 上调：整体放大
-            double maxScale = (rmax / Math.max(rmin, averageBase()));
-            globalScale = Math.min(globalScale * (1.0 + s), maxScale);
-            System.out.printf("[FAFT Adjust] Error=%.4f > %.4f, globalScale=%.3f%n", Eobs, Emax, globalScale);
+            // 上调：只调 Top 30% 重要算子
+            List<String> topOps = topKByImportance(true, 0.3);
+            for (String op : topOps) {
+                double oldR = ratioByOperator.getOrDefault(op, currentRatio);
+                double newR = clamp(oldR + step);
+                ratioByOperator.put(op, newR);
+                System.out.printf("[FAFT Adjust][LOCAL-UP] op=%s oldR=%.3f newR=%.3f (error=%.4f > %.4f)%n",
+                        op, oldR, newR, Eobs, Emax);
+            }
         } else if (Eobs < lower) {
-            // 下调：整体收缩
-            double minScale = rmin / Math.max(rmin, averageBase());
-            globalScale = Math.max(globalScale * (1.0 - s), minScale);
-            System.out.printf("[FAFT Adjust] Error=%.4f < %.4f, globalScale=%.3f%n", Eobs, lower, globalScale);
+            // 下调：只调 Bottom 30% 重要算子
+            List<String> lowOps = topKByImportance(false, 0.3);
+            for (String op : lowOps) {
+                double oldR = ratioByOperator.getOrDefault(op, currentRatio);
+                double newR = clamp(oldR - step);
+                ratioByOperator.put(op, newR);
+                System.out.printf("[FAFT Adjust][LOCAL-DOWN] op=%s oldR=%.3f newR=%.3f (error=%.4f < %.4f)%n",
+                        op, oldR, newR, Eobs, lower);
+            }
         }
     }
-    private double averageBase() {
-        if (ratioByOperator.isEmpty()) return currentRatio;
-        double s = 0; for (double v : ratioByOperator.values()) s += v;
-        return s / ratioByOperator.size();
-    }
 
-    public void printStats() {
-        System.out.printf("[FAFT Stats] Processed=%d | Backups=%d | globalScale=%.2f%n",
-                processedCount, backupCount, globalScale);
+    // 工具：取 Top/Bottom K
+    private List<String> topKByImportance(boolean highFirst, double portion) {
+        List<Map.Entry<String, Double>> list = new ArrayList<>(importanceMap.entrySet());
+        list.sort((a, b) -> highFirst
+                ? Double.compare(b.getValue(), a.getValue())
+                : Double.compare(a.getValue(), b.getValue()));
+        int k = Math.max(1, (int) (list.size() * portion));
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < Math.min(k, list.size()); i++) {
+            out.add(list.get(i).getKey());
+        }
+        return out;
     }
 
     // ====== Step4：动态重算 I→r（每 periodMs 刷新一次）======
@@ -173,4 +193,10 @@ public class ApproxBackupManager {
             }
         }, periodMs, periodMs, TimeUnit.MILLISECONDS);
     }
+
+    public void printStats() {
+        System.out.printf("[FAFT Stats] Processed=%d | Backups=%d | globalScale=%.2f%n",
+                processedCount, backupCount, globalScale);
+    }
+
 }

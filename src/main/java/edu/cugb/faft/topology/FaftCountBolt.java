@@ -25,11 +25,17 @@ public class FaftCountBolt extends BaseRichBolt {
         this.collector = collector;
         this.operatorId = context.getThisComponentId();
         this.counts = new HashMap<>();
-
-        // 初始化 ApproxBackupManager（单例）
-        double initRatio = 0.5; // 简化版写死，完整版会来自算子权重
-        double min = 0.1, max = 1.0, step = 0.1;
-        this.backupManager = ApproxBackupManager.init(initRatio, min, max, step);
+        try {
+            this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
+        } catch (IllegalStateException e) {
+            // 如果还没初始化，则用默认参数兜底初始化一次
+            this.backupManager = ApproxBackupManager.init(
+                    0.5,   // 初始采样率
+                    0.1,   // 最小采样率
+                    1.0,   // 最大采样率
+                    0.05   // 步长
+            );
+        }
 
         // 接收拓扑下发的每算子采样率表（会在 Launcher 里下发）
         Object ratios = topoConf.get("faft.ratios");
@@ -39,6 +45,12 @@ public class FaftCountBolt extends BaseRichBolt {
             this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
             System.out.println("[FAFT RatioUpdate] count received ratios=" + ratios);
         }
+
+        Object importance = topoConf.get("faft.importance");
+        if (importance instanceof Map) {
+            backupManager.updateImportance((Map<String, Double>) importance);
+            System.out.println("[FAFT ImportanceUpdate] count received importance=" + importance);
+        }
     }
 
     @Override
@@ -47,12 +59,11 @@ public class FaftCountBolt extends BaseRichBolt {
         int count = counts.getOrDefault(word, 0) + 1;
         counts.put(word, count);
 
-        // 发射到下游
-        collector.emit(new Values(word, count));
-
         // 按算子 ID 尝试近似备份
         backupManager.tryBackup(operatorId, new HashMap<>(counts));
 
+        // 发射到下游
+        collector.emit(new Values(word, count));
         collector.ack(tuple);
     }
 

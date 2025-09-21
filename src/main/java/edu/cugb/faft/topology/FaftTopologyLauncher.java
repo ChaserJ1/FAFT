@@ -9,10 +9,7 @@ import org.apache.storm.generated.AlreadyAliveException;
 import org.apache.storm.generated.InvalidTopologyException;
 import org.apache.storm.topology.TopologyBuilder;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 public class FaftTopologyLauncher {
     public static void main(String[] args) throws Exception {
@@ -44,14 +41,23 @@ public class FaftTopologyLauncher {
         conf.setNumWorkers(2);      // Worker 数量，集群上用
         conf.setMessageTimeoutSecs(30);
 
-        // --- 2.1 DAG：componentId -> children ---
+        // 发射加速
+        conf.put(Config.TOPOLOGY_STATS_SAMPLE_RATE, 1.0);
+
+        // 2.1 DAG：componentId -> children（用 ArrayList 以防某些序列化问题）
         Map<String, List<String>> dag = new HashMap<>();
-        dag.put("source-spout",    List.of("split-bolt"));
-        dag.put("split-bolt",      List.of("filter-bolt"));
-        dag.put("filter-bolt",     List.of("faft-count-bolt"));
-        dag.put("faft-count-bolt", List.of("faft-sink-bolt"));
-        dag.put("faft-sink-bolt",  List.of()); // sink
-        Set<String> sinks = Set.of("faft-sink-bolt");
+        dag.put("source-spout",    new ArrayList<>(List.of("split-bolt")));
+        dag.put("split-bolt",      new ArrayList<>(List.of("filter-bolt")));
+        dag.put("filter-bolt",     new ArrayList<>(List.of("faft-count-bolt")));
+        dag.put("faft-count-bolt", new ArrayList<>(List.of("faft-sink-bolt")));
+        dag.put("faft-sink-bolt",  new ArrayList<>());
+
+        // sinks
+        Set<String> sinks = new HashSet<>(List.of("faft-sink-bolt"));
+
+        // 放入 conf，供各 bolt 读取并启动动态重算
+        conf.put("faft.dag", dag);
+        conf.put("faft.sinks", sinks);
 
         // --- 2.2 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标） ---
         Map<String, OperatorInfo> infos = new HashMap<>();

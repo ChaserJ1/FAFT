@@ -37,6 +37,7 @@ public class FaftCountBolt extends BaseRichBolt {
         if (ratios instanceof Map) {
             //noinspection unchecked
             this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
+            System.out.println("[FAFT RatioUpdate] count received ratios=" + ratios);
         }
     }
 

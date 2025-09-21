@@ -7,9 +7,7 @@ import org.apache.storm.topology.OutputFieldsDeclarer;
 import org.apache.storm.topology.base.BaseRichBolt;
 import org.apache.storm.tuple.Tuple;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 
 @SuppressWarnings("unchecked")
 public class FaftSinkBolt extends BaseRichBolt {
@@ -26,11 +24,12 @@ public class FaftSinkBolt extends BaseRichBolt {
     public void prepare(Map<String, Object> topoConf, TopologyContext context,
                         OutputCollector collector) {
         this.collector = collector;
-        this.result = new HashMap<>();
         this.operatorId = context.getThisComponentId();
-        try{
+        System.out.println("[FAFT BoltInit] sink componentId=" + this.operatorId);
+        this.result = new HashMap<>();
+        try {
             this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
-        }catch (IllegalStateException e){
+        } catch (IllegalStateException e) {
             // 如果还没初始化，则用默认参数兜底初始化一次
             this.backupManager = ApproxBackupManager.init(
                     0.5,   // 初始采样率
@@ -39,13 +38,33 @@ public class FaftSinkBolt extends BaseRichBolt {
                     0.05   // 步长
             );
         }
-        // 从拓扑配置中接收“每算子采样率表”，并下发给管理器
+        // 1）从拓扑配置中接收“每算子采样率表”，并下发给管理器
         Object ratios = topoConf.get("faft.ratios");
         if (ratios instanceof Map) {
             this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
             System.out.println("[FAFT RatioUpdate] sink received ratios=" + ratios);
         }
 
+        // 2) 准备 DAG & sinks：优先从 conf 读取；没有就本地回退一份
+        Map<String, List<String>> dag = (Map<String, List<String>>) topoConf.get("faft.dag");
+        Set<String> sinks = (Set<String>) topoConf.get("faft.sinks");
+        if (dag == null) {
+            dag = new HashMap<>();
+            dag.put("source-spout", List.of("split-bolt"));
+            dag.put("split-bolt", List.of("filter-bolt"));
+            dag.put("filter-bolt", List.of("faft-count-bolt"));
+            dag.put("faft-count-bolt", List.of("faft-sink-bolt"));
+            dag.put("faft-sink-bolt", List.of());
+            sinks = Set.of("faft-sink-bolt");
+            System.out.println("[FAFT Rebalance] fallback DAG used in sink");
+        }
+
+        // 3) 启动动态重算（10s 一次；参数先与 Launcher 保持一致）
+        double alpha = 0.34, beta = 0.33, gamma = 0.33;
+        double impactDelta = 0.9, decayAlpha = 0.9;
+        double rmin = 0.10, rmax = 1.00;
+        this.backupManager.startDynamicRebalance(
+                dag, sinks, alpha, beta, gamma, impactDelta, decayAlpha, rmin, rmax, 10_000L);
 
     }
 

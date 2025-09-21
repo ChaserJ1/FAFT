@@ -87,7 +87,16 @@ public class FaftTopologyLauncher {
         Map<String, Double> ratios = res.R; // 每个算子的采样率
         System.out.println("[FAFT Init] ratios=" + ratios);
         conf.put("faft.ratios", ratios);    // 初试采样率
-        conf.put("faft.importance", res.I); // 初始重要性
+
+        // importance 转换成 Map<String, String>，保证 JSON 序列化安全
+        Map<String, String> importanceStr = new HashMap<>();
+        for (Map.Entry<String, Double> e : res.I.entrySet()) {
+            importanceStr.put(e.getKey(), String.valueOf(e.getValue()));
+        }
+        conf.put("faft.importance", importanceStr); // 初始重要性
+
+        System.out.println("[FAFT Init] ratios=" + res.R);
+        System.out.println("[FAFT Init] importance=" + importanceStr);
 
         // 3. 根据运行模式提交
         if (args != null && args.length > 0) {

@@ -46,10 +46,16 @@ public class FaftCountBolt extends BaseRichBolt {
             System.out.println("[FAFT RatioUpdate] count received ratios=" + ratios);
         }
 
-        Object importance = topoConf.get("faft.importance");
-        if (importance instanceof Map) {
-            backupManager.updateImportance((Map<String, Double>) importance);
-            System.out.println("[FAFT ImportanceUpdate] count received importance=" + importance);
+        // 读取 importance
+        Object impObj = topoConf.get("faft.importance");
+        if (impObj instanceof Map) {
+            Map<String, String> impStrMap = (Map<String, String>) impObj;
+            Map<String, Double> impDoubleMap = new HashMap<>();
+            for (Map.Entry<String, String> e : impStrMap.entrySet()) {
+                impDoubleMap.put(e.getKey(), Double.parseDouble(e.getValue()));
+            }
+            this.backupManager.updateImportance(impDoubleMap);
+            System.out.println("[FAFT ImportanceUpdate][count] " + impDoubleMap);
         }
     }
 

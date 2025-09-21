@@ -184,9 +184,11 @@ public class ApproxBackupManager {
                         edu.cugb.faft.importance.NodeImportanceEvaluator.evaluateAndAssignRatios(
                                 dag, sinks, infos, alpha, beta, gamma, impactDelta, decayAlpha, rmin, rmax);
 
-                // E) 刷新 per-op 基准 r 表
+                // E) 刷新 per-op 基准 r 表, 同步刷新 importance 表
                 updateSamplingRatios(res.R);
                 System.out.println("[FAFT Rebalance] R=" + res.R);
+                updateImportance(res.I);
+                System.out.println("[FAFT Rebalance] I=" + res.I);
             } catch (Throwable t) {
                 t.printStackTrace();
                 System.err.println("[FAFT Rebalance] failed: " + t.getMessage());

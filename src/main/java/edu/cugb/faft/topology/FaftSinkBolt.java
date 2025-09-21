@@ -45,10 +45,15 @@ public class FaftSinkBolt extends BaseRichBolt {
             System.out.println("[FAFT RatioUpdate] sink received ratios=" + ratios);
         }
         // 从拓扑配置中接收“每算子重要性表”
-        Object imps = topoConf.get("faft.importance");
-        if (imps instanceof Map) {
-            this.backupManager.updateImportance((Map<String, Double>) imps);
-            System.out.println("[FAFT ImportanceUpdate] sink received importance=" + imps);
+        Object impObj = topoConf.get("faft.importance");
+        if (impObj instanceof Map) {
+            Map<String, String> impStrMap = (Map<String, String>) impObj;
+            Map<String, Double> impDoubleMap = new HashMap<>();
+            for (Map.Entry<String, String> e : impStrMap.entrySet()) {
+                impDoubleMap.put(e.getKey(), Double.parseDouble(e.getValue()));
+            }
+            this.backupManager.updateImportance(impDoubleMap);
+            System.out.println("[FAFT ImportanceUpdate][sink] " + impDoubleMap);
         }
 
         // 2) 准备 DAG & sinks：优先从 conf 读取；没有就本地回退一份

@@ -27,6 +27,7 @@ public class FaftSinkBolt extends BaseRichBolt {
                         OutputCollector collector) {
         this.collector = collector;
         this.result = new HashMap<>();
+        this.operatorId = context.getThisComponentId();
         try{
             this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
         }catch (IllegalStateException e){
@@ -38,7 +39,7 @@ public class FaftSinkBolt extends BaseRichBolt {
                     0.05   // 步长
             );
         }
-        // ★ 新增：从拓扑配置中接收“每算子采样率表”，并下发给管理器
+        // 从拓扑配置中接收“每算子采样率表”，并下发给管理器
         Object ratios = topoConf.get("faft.ratios");
         if (ratios instanceof Map) {
             this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);

@@ -49,7 +49,7 @@ public class ChaosBolt extends BaseRichBolt {
             }
 
             // 正常处理：直接转发
-            String word = input.getStringByField("word");
+            String word = input.getStringByField("filteredWord");
             collector.emit(input, new Values(word));
             collector.ack(input);
 

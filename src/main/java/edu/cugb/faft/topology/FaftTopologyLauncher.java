@@ -27,9 +27,12 @@ public class FaftTopologyLauncher {
         builder.setBolt("filter-bolt", new FilterBolt(), 2)
                .shuffleGrouping("split-bolt");
 
+        builder.setBolt("chaos-bolt", new ChaosBolt(0.05, 0.05, 50), 2)
+                .shuffleGrouping("filter-bolt");
+
         // 近似容错计数器
         builder.setBolt("faft-count-bolt", new FaftCountBolt(), 2)
-               .fieldsGrouping("filter-bolt", new org.apache.storm.tuple.Fields("filteredWord"));
+               .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("filteredWord"));
 
         // 下沉，误差反馈调节
         builder.setBolt("faft-sink-bolt", new FaftSinkBolt(), 1)
@@ -49,6 +52,7 @@ public class FaftTopologyLauncher {
         dag.put("source-spout",    new ArrayList<>(List.of("split-bolt")));
         dag.put("split-bolt",      new ArrayList<>(List.of("filter-bolt")));
         dag.put("filter-bolt",     new ArrayList<>(List.of("faft-count-bolt")));
+        dag.put("chaos-bolt",      new ArrayList<>(List.of("faft-count-bolt")));
         dag.put("faft-count-bolt", new ArrayList<>(List.of("faft-sink-bolt")));
         dag.put("faft-sink-bolt",  new ArrayList<>());
 

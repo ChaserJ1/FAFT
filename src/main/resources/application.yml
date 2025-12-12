@@ -1,5 +1,5 @@
 faft:
-  # 重要性系数 I(v) = alpha*O + beta*D + gamma*C
+  # 重要性系数 (v) = alpha*O + beta*D + gamma*C
   alpha: 0.34
   beta: 0.33
   gamma: 0.33
@@ -15,3 +15,5 @@ faft:
   # 结构依赖的衰减参数（用于 UpDownStreamDependency / OutputImpact）
   decay-alpha: 0.9 # 用于 D(v)
   impact-delta: 0.9 # 用于 O(v)
+
+  zk-connect: 192.168.213.130:2181,192.168.213.131:2181,192.168.213.132:2181

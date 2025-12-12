@@ -8,10 +8,31 @@ import org.apache.storm.StormSubmitter;
 import org.apache.storm.generated.AlreadyAliveException;
 import org.apache.storm.generated.InvalidTopologyException;
 import org.apache.storm.topology.TopologyBuilder;
+import org.yaml.snakeyaml.Yaml;
 
+import java.io.InputStream;
 import java.util.*;
 
+import static org.apache.commons.lang3.math.NumberUtils.toDouble;
+
 public class FaftTopologyLauncher {
+    // 获取 application.yml文件里的数据
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadFaftConfig(){
+        Yaml yaml = new Yaml();
+        try(InputStream in = FaftTopologyLauncher.class.getClassLoader().getResourceAsStream("application.yml")){
+            if (in == null){
+                System.err.println("[FAFT-WARN] application.yml 获取失败，将使用默认参数");
+                return null;
+            }
+            Map<String, Object> obj = yaml.load(in);
+
+            return (Map<String, Object>) obj.get("faft");
+        } catch (Exception e){
+            e.printStackTrace();
+            return null;
+        }
+    }
     public static void main(String[] args) throws Exception {
         // 1. 构建拓扑
         TopologyBuilder builder = new TopologyBuilder();
@@ -27,6 +48,7 @@ public class FaftTopologyLauncher {
         builder.setBolt("filter-bolt", new FilterBolt(), 2)
                .shuffleGrouping("split-bolt");
 
+        // 故障注入
         builder.setBolt("chaos-bolt", new ChaosBolt(0.05, 0.05, 50), 2)
                 .shuffleGrouping("filter-bolt");
 
@@ -38,7 +60,7 @@ public class FaftTopologyLauncher {
         builder.setBolt("faft-sink-bolt", new FaftSinkBolt(), 1)
                .globalGrouping("faft-count-bolt");
 
-        // 2. 配置 计算 O/D/C -> I -> r，并随拓扑下发
+        // 2. 算法参数、配置加载
         Config conf = new Config();
         conf.setDebug(false);       // 关闭 debug，避免日志过多
         conf.setNumWorkers(2);      // Worker 数量，集群上用
@@ -47,11 +69,59 @@ public class FaftTopologyLauncher {
         // 发射加速
         conf.put(Config.TOPOLOGY_STATS_SAMPLE_RATE, 1.0);
 
-        // 2.1 DAG：componentId -> children（用 ArrayList 以防某些序列化问题）
+        // 默认参数
+        double alpha = 0.34;
+        double beta = 0.33;
+        double gamma = 0.33;
+
+        double impactDelta = 0.9;
+        double decayAlpha = 0.9;
+        double errorThreshold = 0.05;
+
+        double rmin = 0.1;
+        double rmax = 0.9;
+        double step = 0.05;
+
+
+        // 加载yml参数
+        Map<String, Object> faftConfig = loadFaftConfig();
+        if (faftConfig != null){
+            System.out.println("[FAFT-INFO] 成功加载 application.yml 配置：" + faftConfig);
+            // 权重参数
+            alpha = getDouble(faftConfig, "alpha", 0.34);
+            beta  = getDouble(faftConfig, "beta", 0.33);
+            gamma = getDouble(faftConfig, "gamma", 0.33);
+
+            // 算法超参
+            impactDelta = getDouble(faftConfig, "impact-delta", 0.9);
+            decayAlpha  = getDouble(faftConfig, "decay-alpha", 0.9);
+            errorThreshold = getDouble(faftConfig, "error-threshold", 0.05);
+
+            // 采样率范围
+            rmin = getDouble(faftConfig, "rmin", 0.1);
+            rmax = getDouble(faftConfig, "rmax", 1.0);
+            step = getDouble(faftConfig, "step", 0.05);
+
+            // Zookeeper 连接地址 (字符串直接取)
+            conf.put("faft.zk.connect", faftConfig.getOrDefault("zk-connect", "127.0.0.1:2181"));
+        }
+
+        // 放入 config
+        conf.put("faft.alpha", alpha);
+        conf.put("faft.beta",  beta);
+        conf.put("faft.gamma", gamma);
+        conf.put("faft.impact.delta", impactDelta);
+        conf.put("faft.decay.alpha",  decayAlpha);
+        conf.put("faft.error.threshold", errorThreshold);
+        conf.put("faft.rmin", rmin);
+        conf.put("faft.rmax", rmax);
+        conf.put("faft.step", step);
+
+        // 2.1 构建 DAG & OperatorInfo
         Map<String, List<String>> dag = new HashMap<>();
         dag.put("source-spout",    new ArrayList<>(List.of("split-bolt")));
         dag.put("split-bolt",      new ArrayList<>(List.of("filter-bolt")));
-        dag.put("filter-bolt",     new ArrayList<>(List.of("faft-count-bolt")));
+        dag.put("filter-bolt",     new ArrayList<>(List.of("chaos-bolt")));
         dag.put("chaos-bolt",      new ArrayList<>(List.of("faft-count-bolt")));
         dag.put("faft-count-bolt", new ArrayList<>(List.of("faft-sink-bolt")));
         dag.put("faft-sink-bolt",  new ArrayList<>());
@@ -63,7 +133,7 @@ public class FaftTopologyLauncher {
         conf.put("faft.dag", dag);
         conf.put("faft.sinks", sinkList);
 
-        // --- 2.2 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标） ---
+        // 2.2 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标） ---
         Map<String, OperatorInfo> infos = new HashMap<>();
         // cpu, mem, tps（都已归一化到 0~1），这里先拉开差距便于观察采样差异
         infos.put("split-bolt",      new OperatorInfo("split-bolt",      0.20, 0.20, 0.30));
@@ -71,12 +141,7 @@ public class FaftTopologyLauncher {
         infos.put("faft-count-bolt", new OperatorInfo("faft-count-bolt", 0.70, 0.60, 0.90)); // 负载更高
         infos.put("faft-sink-bolt",  new OperatorInfo("faft-sink-bolt",  0.10, 0.10, 0.20));
 
-        // --- 2.3 重要性权重与参数（先用默认值；可挪到 yml 配置） ---
-        double alpha = 0.34, beta = 0.33, gamma = 0.33; // I(v) = αO + βD + γC
-        double impactDelta = 0.9;   // = delta, 供 O(v) 衰减
-        double decayAlpha  = 0.9;   // 供 D(v) 衰减
-        double rmin = 0.10, rmax = 1.00;
-
+        // 执行重要性评估算法
         HashSet<String> sinks = new HashSet<>(sinkList);
         NodeImportanceEvaluator.Result res =
                 NodeImportanceEvaluator.evaluateAndAssignRatios(
@@ -87,7 +152,7 @@ public class FaftTopologyLauncher {
                         rmin, rmax
                 );
 
-        // --- 2.4 下发到 Storm Config，供各 Bolt 在 prepare() 读取 ---
+        // 结果下发到 Storm Config，供各 Bolt 在 prepare() 读取
         Map<String, Double> ratios = res.R; // 每个算子的采样率
         System.out.println("[FAFT Init] ratios=" + ratios);
         conf.put("faft.ratios", ratios);    // 初试采样率
@@ -119,5 +184,11 @@ public class FaftTopologyLauncher {
             cluster.killTopology("faft-topology-local");
             cluster.shutdown();
         }
+    }
+
+    private static double getDouble(Map<String, Object> map, String key, double defaultValue) {
+        Object val = map.get(key);
+        // 如果 val 为 null，String.valueOf 会返回 "null"，toDouble 会解析失败并返回 defaultValue
+        return toDouble(String.valueOf(val), defaultValue);
     }
 }

@@ -1,5 +1,6 @@
 package edu.cugb.faft.topology;
 
+import edu.cugb.faft.monitor.DistributedLatencyMonitor;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -40,12 +41,12 @@ public class ChaosBolt extends BaseRichBolt {
             // 模拟随机延迟
             if (random.nextDouble() < delayProbability) {
                 Thread.sleep(delayMillis);
-                System.out.println("[ChaosBolt] Injected delay " + delayMillis + "ms");
+                System.out.println("[ChaosBolt] 触发延迟注入 " + delayMillis + "ms");
             }
 
             // 模拟随机失败
             if (random.nextDouble() < failProbability) {
-                throw new RuntimeException("[ChaosBolt] Injected failure!");
+                throw new RuntimeException();
             }
 
             // 正常处理：直接转发
@@ -54,6 +55,16 @@ public class ChaosBolt extends BaseRichBolt {
             collector.ack(input);
 
         } catch (Exception e) {
+            try {
+                DistributedLatencyMonitor.recordFailure();
+                System.err.println("✅ [ChaosBolt] 故障时间已写入 Zookeeper");
+            } catch (Exception zke) {
+                System.err.println("❌ [ChaosBolt] 写入 Zookeeper 失败: " + zke.getMessage());
+            }
+            // 打印堆栈上报
+            System.err.println("[ChaosBolt] 触发故障注入");
+            e.printStackTrace();
+
             collector.reportError(e);
             collector.fail(input); // Default 拓扑会走重放；FAFT 会触发近似备份恢复
         }

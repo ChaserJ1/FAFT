@@ -34,7 +34,8 @@ public class FaftTopologyLauncher {
         }
     }
     public static void main(String[] args) throws Exception {
-        // 1. 构建拓扑
+        // 1. 构建物理拓扑
+        // 数据流向： Source -> Split -> filter -> Chaos -> Count -> Sink
         TopologyBuilder builder = new TopologyBuilder();
 
         // 数据源 Spout
@@ -65,14 +66,12 @@ public class FaftTopologyLauncher {
         conf.setDebug(false);       // 关闭 debug，避免日志过多
         conf.setNumWorkers(2);      // Worker 数量，集群上用
         conf.setMessageTimeoutSecs(30);
-
-        // 发射加速
-        conf.put(Config.TOPOLOGY_STATS_SAMPLE_RATE, 1.0);
+        conf.put(Config.TOPOLOGY_STATS_SAMPLE_RATE, 1.0); // 发射加速
 
         // 默认参数
-        double alpha = 0.34;
-        double beta = 0.33;
-        double gamma = 0.33;
+        double defAlpha = 0.34;
+        double defBeta = 0.33;
+        double defGamma = 0.33;
 
         double impactDelta = 0.9;
         double decayAlpha = 0.9;
@@ -82,42 +81,59 @@ public class FaftTopologyLauncher {
         double rmax = 0.9;
         double step = 0.05;
 
+        String zkConnect = "127.0.0.1:2181";
+
+        // 差异化权重 Map
+        Map<String, List<Double>> rawWeightsMap = new HashMap<>();
 
         // 加载yml参数
         Map<String, Object> faftConfig = loadFaftConfig();
-        if (faftConfig != null){
+        if (faftConfig != null) {
             System.out.println("[FAFT-INFO] 成功加载 application.yml 配置：" + faftConfig);
             // 权重参数
-            alpha = getDouble(faftConfig, "alpha", 0.34);
-            beta  = getDouble(faftConfig, "beta", 0.33);
-            gamma = getDouble(faftConfig, "gamma", 0.33);
+            defAlpha = getDouble(faftConfig, "alpha", defAlpha);
+            defBeta = getDouble(faftConfig, "beta", defBeta);
+            defGamma = getDouble(faftConfig, "gamma", defGamma);
 
-            // 算法超参
-            impactDelta = getDouble(faftConfig, "impact-delta", 0.9);
-            decayAlpha  = getDouble(faftConfig, "decay-alpha", 0.9);
-            errorThreshold = getDouble(faftConfig, "error-threshold", 0.05);
+            // 解析算法超参
+            impactDelta = getDouble(faftConfig, "impact-delta", impactDelta);
+            decayAlpha = getDouble(faftConfig, "decay-alpha", decayAlpha);
+            errorThreshold = getDouble(faftConfig, "error-threshold", errorThreshold);
 
-            // 采样率范围
-            rmin = getDouble(faftConfig, "rmin", 0.1);
-            rmax = getDouble(faftConfig, "rmax", 1.0);
-            step = getDouble(faftConfig, "step", 0.05);
+            rmin = getDouble(faftConfig, "rmin", rmin);
+            rmax = getDouble(faftConfig, "rmax", rmax);
+            step = getDouble(faftConfig, "step", step);
 
-            // Zookeeper 连接地址 (字符串直接取)
-            conf.put("faft.zk.connect", faftConfig.getOrDefault("zk-connect", "127.0.0.1:2181"));
+            // 解析 Zookeeper 地址
+            zkConnect = (String) faftConfig.getOrDefault("zk-connect", zkConnect);
+
+            // 解析差异化权重 (weights: map<string, list<double>>)
+            if (faftConfig.containsKey("weights")) {
+                @SuppressWarnings("unchecked")
+                Map<String, List<Double>> wCfg = (Map<String, List<Double>>) faftConfig.get("weights");
+                if (wCfg != null) {
+                    rawWeightsMap.putAll(wCfg);
+                }
+            }
         }
 
         // 放入 config
-        conf.put("faft.alpha", alpha);
-        conf.put("faft.beta",  beta);
-        conf.put("faft.gamma", gamma);
+        conf.put("faft.alpha", defAlpha);
+        conf.put("faft.beta",  defBeta);
+        conf.put("faft.gamma", defGamma);
+
         conf.put("faft.impact.delta", impactDelta);
         conf.put("faft.decay.alpha",  decayAlpha);
         conf.put("faft.error.threshold", errorThreshold);
+
         conf.put("faft.rmin", rmin);
         conf.put("faft.rmax", rmax);
         conf.put("faft.step", step);
 
-        // 2.1 构建 DAG & OperatorInfo
+        conf.put("faft.zk.connect", zkConnect); // 注入 ZK 地址
+        conf.put("faft.weights", rawWeightsMap); // 注入差异化权重表 (原始 Map)
+
+        // 3. 构建逻辑拓扑 DAG & 静态 OperatorInfo
         Map<String, List<String>> dag = new HashMap<>();
         dag.put("source-spout",    new ArrayList<>(List.of("split-bolt")));
         dag.put("split-bolt",      new ArrayList<>(List.of("filter-bolt")));
@@ -133,7 +149,7 @@ public class FaftTopologyLauncher {
         conf.put("faft.dag", dag);
         conf.put("faft.sinks", sinkList);
 
-        // 2.2 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标） ---
+        // 静态 OperatorInfo 占位（0~1 的相对值；之后会换成实时指标）
         Map<String, OperatorInfo> infos = new HashMap<>();
         // cpu, mem, tps（都已归一化到 0~1），这里先拉开差距便于观察采样差异
         infos.put("split-bolt",      new OperatorInfo("split-bolt",      0.20, 0.20, 0.30));
@@ -141,21 +157,33 @@ public class FaftTopologyLauncher {
         infos.put("faft-count-bolt", new OperatorInfo("faft-count-bolt", 0.70, 0.60, 0.90)); // 负载更高
         infos.put("faft-sink-bolt",  new OperatorInfo("faft-sink-bolt",  0.10, 0.10, 0.20));
 
-        // 执行重要性评估算法
+        // 4. 执行初始重要性评估算法
+        // 4.1 准备权重对象
+        NodeImportanceEvaluator.Weights defaultWeightsObj =
+                new NodeImportanceEvaluator.Weights(defAlpha, defBeta, defGamma);
+
+        Map<String, NodeImportanceEvaluator.Weights> weightsObjMap = new HashMap<>();
+        for (Map.Entry<String, List<Double>> entry : rawWeightsMap.entrySet()) {
+            List<Double> val = entry.getValue();
+            if (val != null && val.size() >= 3) {
+                weightsObjMap.put(entry.getKey(),
+                        new NodeImportanceEvaluator.Weights(val.get(0), val.get(1), val.get(2)));
+            }
+        }
+        // 4.2 调用评估算法
         HashSet<String> sinks = new HashSet<>(sinkList);
         NodeImportanceEvaluator.Result res =
                 NodeImportanceEvaluator.evaluateAndAssignRatios(
                         dag, sinks, infos,
-                        alpha, beta, gamma,
-                        impactDelta,   // delta for O(v)
-                        decayAlpha,    // decayAlpha for D(v)
+                        weightsObjMap, defaultWeightsObj, // 传入差异化权重
+                        impactDelta, decayAlpha,
                         rmin, rmax
                 );
 
-        // 结果下发到 Storm Config，供各 Bolt 在 prepare() 读取
+        // 4.3 结果下发到 Storm Config，供各 Bolt 在 prepare() 读取
         Map<String, Double> ratios = res.R; // 每个算子的采样率
-        System.out.println("[FAFT Init] ratios=" + ratios);
-        conf.put("faft.ratios", ratios);    // 初试采样率
+        System.out.println("[FAFT Init] 初始采样率 ratios = " + ratios);
+        conf.put("faft.ratios", ratios);    // 初始采样率
 
         // importance 转换成 Map<String, String>，保证 JSON 序列化安全
         Map<String, String> importanceStr = new HashMap<>();
@@ -164,8 +192,7 @@ public class FaftTopologyLauncher {
         }
         conf.put("faft.importance", importanceStr); // 初始重要性
 
-        System.out.println("[FAFT Init] ratios=" + res.R);
-        System.out.println("[FAFT Init] importance=" + importanceStr);
+        System.out.println("[FAFT Init] 初始重要性 importance =" + importanceStr);
 
         // 3. 根据运行模式提交
         if (args != null && args.length > 0) {

@@ -1,8 +1,15 @@
 faft:
   # 重要性系数 (v) = alpha*O + beta*D + gamma*C
+  # 全局默认权重（兜底）
   alpha: 0.34
   beta: 0.33
   gamma: 0.33
+
+  # 差异化权重系数配置
+  weights:
+    "split-bolt": [0.5, 0.5, 0.0]
+    "chaos-bolt": [0.3, 0.3, 0.4]
+    "faft-count-bolt": [0.20, 0.60, 0.20]
 
   # 采样率上下限与步长
   rmin: 0.10

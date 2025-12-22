@@ -18,13 +18,19 @@ public class DistributedLatencyMonitor {
     // 恢复时间读取路径
     private static final String RECOVERY_PATH = "/faft/experiment/recovery_time";
     //zookeeper所在机器ip地址
-    private static final String ZK_CONN_STRING = "192.168.213.130:2181";
+    private static String ZK_CONN_STRING = "192.168.213.130:2181";
 
+
+    public static synchronized void setZkConnect(String connectString) {
+        if (connectString != null && !connectString.isEmpty()) {
+            ZK_CONN_STRING = connectString;
+        }
+    }
 
     // 初始化 Zookeeper 客户端
     public static synchronized void init() {
         if (client == null) {
-            CuratorFrameworkFactory.newClient(
+            client = CuratorFrameworkFactory.newClient(
                     ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
             client.start();
         }

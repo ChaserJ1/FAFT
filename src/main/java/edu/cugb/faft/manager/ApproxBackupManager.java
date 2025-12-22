@@ -1,5 +1,7 @@
 package edu.cugb.faft.manager;
 
+import edu.cugb.faft.importance.NodeImportanceEvaluator;
+
 import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.*;
@@ -13,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ApproxBackupManager {
 
-    //单例
+    //单例模式
     private static volatile ApproxBackupManager INSTANCE;
     public static synchronized ApproxBackupManager init(double initRatio, double rmin, double rmax, double step) {
         if (INSTANCE != null) return INSTANCE;
@@ -37,7 +39,7 @@ public class ApproxBackupManager {
     // 每算子的“重要性分数”
     private final ConcurrentHashMap<String, Double> importanceMap = new ConcurrentHashMap<>();
 
-    // 叠加在“基准 r”上的全局缩放，用于误差闭环（让所有算子一起收/放），已改为局部调节
+    // 叠加在“基准 r”上的全局缩放，用于误差闭环（让所有算子一起收/放），已改为局部调节（留作备用）
     private volatile double globalScale = 1.0;
 
     // 统计：全局/每算子处理计数（TPS 差分用）
@@ -46,6 +48,8 @@ public class ApproxBackupManager {
 
     // 动态重算循环
     private final AtomicBoolean rebalanceStarted = new AtomicBoolean(false);
+
+    // 定期重算各个算子的重要性以及采样率
     private final ScheduledExecutorService rebalanceExec =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "faft-rebalancer");
@@ -53,6 +57,7 @@ public class ApproxBackupManager {
                 return t;
             });
 
+    // 构造函数
     private ApproxBackupManager(double initRatio, double rmin, double rmax, double step) {
         this.currentRatio = initRatio;
         this.rmin = rmin;
@@ -60,7 +65,7 @@ public class ApproxBackupManager {
         this.step = step;
     }
 
-    // 更新整张 per-op 采样率表
+    // 用传来的采样率更新整张 per-op 采样率表
     public synchronized void updateSamplingRatios(Map<String, Double> ratios) {
         if (ratios == null || ratios.isEmpty()) return;
         ratioByOperator.clear();
@@ -75,12 +80,21 @@ public class ApproxBackupManager {
         System.out.println("[FAFT ImportanceUpdate] " + importanceMap);
     }
 
-    // ====== 新的按算子 tryBackup（用 opId 查表）======
+    /**
+     * 尝试对指定算子进行备份操作
+     *
+     * @param operatorId 算子id，用于从表中查找对应的采样率
+     * @param state 算子状态信息，当前未使用但保留用于后续扩展
+     */
     public void tryBackup(String operatorId, Map<String, Integer> state) {
+        // 更新采样计数器
         processedCount++;
         if (operatorId != null) processedByOp.merge(operatorId, 1L, Long::sum);
 
+        // 根据算子id获取算子采样率
         double r = getRatioFor(operatorId);
+
+        // 随机概率判断该算子是否需要做备份
         if (random.nextDouble() < r) {
             backupCount++;
             System.out.printf("[FAFT Backup][PER-OP] op=%s ratio=%.2f processed=%d backups=%d%n",
@@ -89,14 +103,23 @@ public class ApproxBackupManager {
         }
     }
 
-    // 实际使用的 r：基准表 * 全局缩放（并夹到 [rmin,rmax]）
+
+    // 根据算子 id，计算算子采样率 r
     private double getRatioFor(String operatorId) {
+        // 从算子采样率基准表中获取算子基准采样率
         double base = ratioByOperator.getOrDefault(operatorId, currentRatio);
+        // 乘以全局缩放因子
         return clamp(base * globalScale);
     }
+
+    // 限制采样率范围
     private double clamp(double x) { return Math.max(rmin, Math.min(rmax, x)); }
 
-    // 局部调节
+    /**
+     * 根据 Sink 端测得的误差进行反馈调节
+     * @param Eobs 观测误差
+     * @param Emax 允许的最大误差阈值
+     */
     public synchronized void adjustByError(double Eobs, double Emax) {
         double lower = 0.5 * Emax;      // 滞回下界
         double s = Math.max(0.01, step); // 用 step 作为缩放步长，最低 1%
@@ -122,8 +145,12 @@ public class ApproxBackupManager {
             }
         }
     }
-
-    // 工具：取 Top/Bottom K
+    /**
+     * 获得 Top/Bottom K 算子列表
+     * @param highFirst 低分(false)/高分(true)优先
+     * @param portion   选取比例
+     * @return 算子列表
+     */
     private List<String> topKByImportance(boolean highFirst, double portion) {
         List<Map.Entry<String, Double>> list = new ArrayList<>(importanceMap.entrySet());
         list.sort((a, b) -> highFirst
@@ -137,10 +164,11 @@ public class ApproxBackupManager {
         return out;
     }
 
-    // ====== Step4：动态重算 I→r（每 periodMs 刷新一次）======
+    // ====== Step4：动态重算 I→r（每 periodMs 刷新一次）====== 暂时为10s
     public void startDynamicRebalance(Map<String, List<String>> dag,
                                       Set<String> sinks,
-                                      double alpha, double beta, double gamma,
+                                      Map<String, NodeImportanceEvaluator.Weights> weightsMap,
+                                      NodeImportanceEvaluator.Weights defaultWeights,
                                       double impactDelta, double decayAlpha,
                                       double rmin, double rmax,
                                       long periodMs) {
@@ -149,7 +177,7 @@ public class ApproxBackupManager {
         final Map<String, Long> lastCount = new ConcurrentHashMap<>();
         rebalanceExec.scheduleAtFixedRate(() -> {
             try {
-                // A) TPS by diff（每算子）
+                // A) TPS 计算每算子的相对处理速度
                 Map<String, Double> tps = new HashMap<>();
                 for (String op : dag.keySet()) {
                     long now = processedByOp.getOrDefault(op, 0L);
@@ -160,7 +188,7 @@ public class ApproxBackupManager {
                 }
                 double maxTps = tps.values().stream().mapToDouble(x -> x).max().orElse(1.0);
 
-                // B) CPU / Mem（进程级近似）
+                // B) CPU / Mem 获取当前 JVM 进程的负载作为近似值
                 double cpu = 0.0;
                 try {
                     com.sun.management.OperatingSystemMXBean os =
@@ -179,10 +207,10 @@ public class ApproxBackupManager {
                     infos.put(op, new edu.cugb.faft.importance.OperatorInfo(op, cpu, mem, ntps));
                 }
 
-                // D) 调你的评估器重算 I→r
-                edu.cugb.faft.importance.NodeImportanceEvaluator.Result res =
-                        edu.cugb.faft.importance.NodeImportanceEvaluator.evaluateAndAssignRatios(
-                                dag, sinks, infos, alpha, beta, gamma, impactDelta, decayAlpha, rmin, rmax);
+                // D) 调用评估器重算 I→r
+                NodeImportanceEvaluator.Result res =
+                        NodeImportanceEvaluator.evaluateAndAssignRatios(
+                                dag, sinks, infos, weightsMap, defaultWeights, impactDelta, decayAlpha, rmin, rmax);
 
                 // E) 刷新 per-op 基准 r 表, 同步刷新 importance 表
                 updateSamplingRatios(res.R);

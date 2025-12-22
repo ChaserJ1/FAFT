@@ -11,9 +11,24 @@ import java.util.Set;
  */
 public class NodeImportanceEvaluator {
 
+    /**
+     * 权重封装类，用于传递 alpha, beta, gamma
+     */
+    public static class Weights {
+        public final double alpha, beta, gamma;
+        public Weights(double alpha, double beta, double gamma) {
+            this.alpha = alpha;
+            this.beta = beta;
+            this.gamma = gamma;
+        }
+    }
+
+    /**
+     * 评估结果封装类
+     */
     public static class Result {
         public final Map<String, Double> O, D, C; // 3个子指标(已归一化)
-        public final Map<String, Double> I;  // 重要性
+        public final Map<String, Double> I;  // 算子重要性
         public final Map<String, Double> R;  // 初始采样率
         public final double maxI;
 
@@ -28,11 +43,26 @@ public class NodeImportanceEvaluator {
         }
     }
 
+    /**
+     * 执行评估并分配采样率
+     *
+     * @param dag            有向无环图结构
+     * @param sinks          Sink 节点集合
+     * @param opInfo         算子运行时信息 (CPU/Mem/TPS)
+     * @param weightsMap     差异化权重配置表 (Key: componentId, Value: Weights)
+     * @param defaultWeights 默认权重配置 (当 Map 中找不到时使用)
+     * @param delta          O(v) 计算用的衰减系数
+     * @param decayAlpha     D(v) 计算用的结构衰减系数
+     * @param rmin           最小采样率
+     * @param rmax           最大采样率
+     * @return 评估结果 Result
+     */
     public static Result evaluateAndAssignRatios(
             Map<String, List<String>> dag,              // DAG
             Set<String> sinks,                          // Sink 集合
             Map<String, OperatorInfo> opInfo,           // 算子资源/吞吐信息
-            double alpha, double beta, double gamma,    // I(v)的三个权重系数
+            Map<String, Weights> weightsMap,            // 差异化权重表
+            Weights defaultWeights,                     // 默认权重
             double delta,                               // O(v) 衰减参数
             double decayAlpha,                          // D(v) 衰减参数
             double rmin, double rmax)                   // 采样率上下限
@@ -57,30 +87,47 @@ public class NodeImportanceEvaluator {
         Map<String, Double> C = normalize(Craw);
 
 
-        // 4) I(v)
+        // 4) I(v) 针对每个节点，取其专属权重系数
         Map<String, Double> I = new HashMap<>();
         double maxI = 0.0;
+        // 确保 weightsMap 不为 null，防空指针
+        if (weightsMap == null) weightsMap = new HashMap<>();
+
         for (String v : dag.keySet()) {
-            double iv = alpha * O.getOrDefault(v, 0.0)
-                    + beta * D.getOrDefault(v, 0.0)
-                    + gamma * C.getOrDefault(v, 0.0);
+            // 获取该算子的权重配置，如果没有则使用默认值
+            Weights w = weightsMap.getOrDefault(v, defaultWeights);
+
+            double iv = w.alpha * O.getOrDefault(v, 0.0)
+                    + w.beta  * D.getOrDefault(v, 0.0)
+                    + w.gamma * C.getOrDefault(v, 0.0);
+
             I.put(v, iv);
             maxI = Math.max(maxI, iv);
         }
 
-        // 6) r(v)
+        // 5) r(v)
+        // 线性映射: r(v) = rmin + (I(v) / maxI) * (rmax - rmin)
         Map<String, Double> R = new HashMap<>();
         for (String v : dag.keySet()) {
-            double rv = (maxI == 0.0) ? rmin : rmin + (I.get(v) / maxI) * (rmax - rmin);
+            double curI = I.get(v);
+            double rv;
+            if (maxI <= 1e-9) {
+                // 避免除以 0，若所有节点重要性都为 0，则给最小采样率
+                rv = rmin;
+            } else {
+                rv = rmin + (curI / maxI) * (rmax - rmin);
+            }
             R.put(v, rv);
         }
+
         return new Result(O, D, C, I, R, maxI);
     }
 
     private static Map<String, Double> normalize(Map<String, Double> m) {
         double max = 0.0;
         for (double v : m.values()) max = Math.max(max, v);
-        if (max == 0.0) return new HashMap<>(m);
+        // 如果最大值为0，直接返回原 Map (全是0)
+        if (max <= 1e-9) return new HashMap<>(m);
         Map<String, Double> out = new HashMap<>();
         for (Map.Entry<String, Double> e : m.entrySet()) out.put(e.getKey(), e.getValue() / max);
         return out;

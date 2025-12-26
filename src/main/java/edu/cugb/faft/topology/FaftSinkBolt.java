@@ -2,7 +2,7 @@ package edu.cugb.faft.topology;
 
 import edu.cugb.faft.importance.NodeImportanceEvaluator;
 import edu.cugb.faft.manager.ApproxBackupManager;
-import edu.cugb.faft.monitor.DistributedLatencyMonitor;
+import edu.cugb.faft.monitor.FaftLatencyMonitor;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -36,7 +36,7 @@ public class FaftSinkBolt extends BaseRichBolt {
         // ===============================================================
         String zkConnect = (String) topoConf.get("faft.zk.connect");
         if (zkConnect == null) zkConnect = "192.168.213.130:2181"; // 默认兜底
-        DistributedLatencyMonitor.setZkConnect(zkConnect);
+        FaftLatencyMonitor.setZkConnect(zkConnect);
 
         // ===============================================================
         // 2. 获取管理器单例
@@ -155,7 +155,7 @@ public class FaftSinkBolt extends BaseRichBolt {
         backupManager.tryBackup(operatorId, new HashMap<>(result));
 
         // 2. 检查故障恢复时间 (调用监控模块)
-        DistributedLatencyMonitor.checkAndRecordRecovery();
+        FaftLatencyMonitor.checkAndRecordRecovery();
 
         // 3. 误差反馈调节 (目前仍为模拟误差，后续需接入真实误差计算)
         // 建议：在这里读取 TrueCountBolt 的值或者 Header 中的 TotalCount

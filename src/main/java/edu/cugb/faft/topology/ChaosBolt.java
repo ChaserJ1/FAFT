@@ -1,6 +1,7 @@
 package edu.cugb.faft.topology;
 
-import edu.cugb.faft.monitor.DistributedLatencyMonitor;
+import edu.cugb.faft.monitor.DefaultLatencyMonitor;
+import edu.cugb.faft.monitor.FaftLatencyMonitor;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -33,6 +34,9 @@ public class ChaosBolt extends BaseRichBolt {
         this.random = new Random();
         System.out.printf("[ChaosBolt] Initialized with failProb=%.2f, delayProb=%.2f, delay=%dms%n",
                 failProbability, delayProbability, delayMillis);
+
+        FaftLatencyMonitor.init();
+        DefaultLatencyMonitor.init();
     }
 
     @Override
@@ -56,10 +60,18 @@ public class ChaosBolt extends BaseRichBolt {
 
         } catch (Exception e) {
             try {
-                DistributedLatencyMonitor.recordFailure();
-                System.err.println("✅ [ChaosBolt] 故障时间已写入 Zookeeper");
+                FaftLatencyMonitor.recordFailure();
+                System.err.println("✅ [ChaosBolt-FAFT] 故障时间已记录");
             } catch (Exception zke) {
-                System.err.println("❌ [ChaosBolt] 写入 Zookeeper 失败: " + zke.getMessage());
+                System.err.println("❌ [ChaosBolt-FAFT] 写入 Zookeeper 失败: " + zke.getMessage());
+            }
+
+            try {
+                DefaultLatencyMonitor.recordFailure();
+                System.err.println("✅ [ChaosBolt-Default] 故障时间已记录");
+            } catch (Exception zke) {
+                zke.printStackTrace(); // 就算这里报错也不影响下面的流程
+                System.err.println("❌ [ChaosBolt-Default] 写入 Zookeeper 失败: " + zke.getMessage());
             }
             // 打印堆栈上报
             System.err.println("[ChaosBolt] 触发故障注入");

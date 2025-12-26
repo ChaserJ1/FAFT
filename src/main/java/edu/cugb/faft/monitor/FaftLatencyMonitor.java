@@ -9,7 +9,7 @@ import org.apache.zookeeper.CreateMode;
  * @Author: pengjia
  * @Description: 指标参数监控获取
  */
-public class DistributedLatencyMonitor {
+public class FaftLatencyMonitor {
 
     // zookeeper 客户端
     private static CuratorFramework client;
@@ -52,7 +52,7 @@ public class DistributedLatencyMonitor {
             if (client.checkExists().forPath(RECOVERY_PATH) != null) {
                 client.delete().forPath(RECOVERY_PATH);
             }
-            System.out.println("[EXP-METRIC] Distributed Failure recorded at: " + now);
+            System.out.println("[EXP-METRIC] Faft failure has been recorded");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

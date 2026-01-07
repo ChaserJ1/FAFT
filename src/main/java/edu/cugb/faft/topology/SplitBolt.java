@@ -11,26 +11,40 @@ import org.apache.storm.tuple.Values;
 import java.util.Map;
 
 /**
- * 句子 → 单词 的拆分算子
- * 输入字段：sentence
- * 输出字段：word
+ * 拆分算子
+ * 解析 TaxiID，并透传 Offset。
  */
 public class SplitBolt extends BaseRichBolt {
     private OutputCollector collector;
 
-    @Override public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
+    @Override
+    public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
         this.collector = collector;
     }
 
-    @Override public void execute(Tuple input) {
-        String sentence = input.getStringByField("sentence");
-        for (String word : sentence.split(" ")) {
-            collector.emit(input, new Values(word));
+    @Override
+    public void execute(Tuple input) {
+        try {
+            String line = input.getStringByField("sentence");
+            Long offset = input.getLongByField("offset"); // 接收 offset
+
+            // 取中间值  数据格式：timestamp, taxiId, ...
+            int firstComma = line.indexOf(',');
+            int secondComma = line.indexOf(',', firstComma + 1);
+
+            if (firstComma != -1 && secondComma != -1) {
+                String taxiId = line.substring(firstComma + 1, secondComma);
+                // 向下游发射 (word, offset)
+                collector.emit(input, new Values(taxiId, offset));
+            }
+        } catch (Exception e) {
+            // 忽略脏数据
         }
         collector.ack(input);
     }
 
-    @Override public void declareOutputFields(OutputFieldsDeclarer declarer) {
-        declarer.declare(new Fields("word"));
+    @Override
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        declarer.declare(new Fields("word", "offset"));
     }
 }

@@ -3,6 +3,7 @@ package edu.cugb.faft.topology;
 import edu.cugb.faft.importance.NodeImportanceEvaluator;
 import edu.cugb.faft.manager.ApproxBackupManager;
 import edu.cugb.faft.monitor.FaftLatencyMonitor;
+import edu.cugb.faft.monitor.GlobalTruth;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -17,8 +18,9 @@ import static org.apache.commons.lang3.math.NumberUtils.toDouble;
 public class FaftSinkBolt extends BaseRichBolt {
     private OutputCollector collector;   // 用于 ack/fail
     private ApproxBackupManager backupManager;
-    private final Random random = new Random();
     private Map<String, Integer> result;
+
+    private double errorThreshold;
 
     private String operatorId; // 记录该算子的 componentId，供按算子采样
 
@@ -102,7 +104,8 @@ public class FaftSinkBolt extends BaseRichBolt {
         double rmin = getDouble(topoConf, "faft.rmin", 0.1);
         double rmax = getDouble(topoConf, "faft.rmax", 1.0);
         // 误差阈值也建议从配置读
-        double errorThreshold = getDouble(topoConf, "faft.error.threshold", 0.05);
+        this.errorThreshold = getDouble(topoConf, "faft.error.threshold", 0.05);
+        System.out.println("[FAFT Config] Loaded errorThreshold: " + this.errorThreshold);
 
         // ===============================================================
         // 5. 准备 DAG & 启动动态重算
@@ -141,38 +144,36 @@ public class FaftSinkBolt extends BaseRichBolt {
     }
 
 
-
     @Override
     public void execute(Tuple tuple) {
         String word = tuple.getStringByField("word");
         int count = tuple.getIntegerByField("count");
         result.put(word, count);
 
-        // 简单日志输出
-        System.out.printf("[FAFT Sink] Word=%s | Count=%d%n", word, count);
+        // 1. 获取上帝视角的真值
+        int realCount = GlobalTruth.getRealCount(word);
 
-        // 1. 尝试备份 Sink 自身的状态
-        backupManager.tryBackup(operatorId, new HashMap<>(result));
+        // 2. 计算相对误差
+        double currentError = 0.0;
+        if (realCount > 0) {
+            currentError = Math.abs((double)realCount - count) / realCount;
+        }
 
-        // 2. 检查故障恢复时间 (调用监控模块)
+        // 3. 打印观测日志，随机打几条看看情况
+        if (Math.random() < 0.001) {
+            System.out.printf(">> [FAFT-Feedback] ID:%s | Approx:%d | Real:%d | Err:%.2f%%%n",
+                    word, count, realCount, currentError * 100);
+        }
+
+        // 4. 调用核心算法进行反馈调节
+        backupManager.adjustByError(currentError, this.errorThreshold);
+
+        // 5. 执行备份逻辑
+        backupManager.tryBackup(operatorId, new HashMap<>(result)); // 注意这里如果有性能问题以后再改
+
+        // 6. 记录恢复延迟监控
         FaftLatencyMonitor.checkAndRecordRecovery();
 
-        // 3. 误差反馈调节 (目前仍为模拟误差，后续需接入真实误差计算)
-        // 建议：在这里读取 TrueCountBolt 的值或者 Header 中的 TotalCount
-        double estimatedError = random.nextDouble() * 0.1;
-
-        // 从配置中动态获取的阈值
-        double errorThreshold = 0.05;
-        // 这里只是演示，实际建议将 errorThreshold 存为成员变量在 prepare 中初始化
-
-
-        // 根据误差调整采样率
-        backupManager.adjustByError(estimatedError, errorThreshold);
-
-        // 定期打印统计信息
-        if (count % 10 == 0) {
-            backupManager.printStats();
-        }
         collector.ack(tuple);
 
     }

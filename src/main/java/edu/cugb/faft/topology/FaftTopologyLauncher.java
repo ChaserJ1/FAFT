@@ -39,12 +39,13 @@ public class FaftTopologyLauncher {
         TopologyBuilder builder = new TopologyBuilder();
 
         // 数据源 Spout
-        builder.setSpout("source-spout", new SourceSpout(), 1);
+        builder.setSpout("source-spout", new FileSourceSpout("faft.txt", true), 1);
 
-        // 拆分句子 -> 单词
+        // 预处理，解析id
         builder.setBolt("split-bolt", new SplitBolt(), 2)
                .shuffleGrouping("source-spout");
 
+        // =================== 近似计算 FAFT =====================
         // 过滤停用词
         builder.setBolt("filter-bolt", new FilterBolt(), 2)
                .shuffleGrouping("split-bolt");

@@ -1,0 +1,109 @@
+package edu.cugb.faft.topology;
+
+import org.apache.storm.spout.SpoutOutputCollector;
+import org.apache.storm.task.TopologyContext;
+import org.apache.storm.topology.OutputFieldsDeclarer;
+import org.apache.storm.topology.base.BaseRichSpout;
+import org.apache.storm.tuple.Fields;
+import org.apache.storm.tuple.Values;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.util.Map;
+import java.util.concurrent.LinkedBlockingQueue;
+
+public class FileSourceSpout extends BaseRichSpout {
+    private SpoutOutputCollector collector;
+    private RandomAccessFile raf;
+    private String fileName;
+    private boolean loop;
+
+    // 重发队列：存储处理失败需要重发的 offset
+    private LinkedBlockingQueue<Long> replayQueue;
+
+    public FileSourceSpout(String fileName, boolean loop) {
+        this.fileName = fileName;
+        this.loop = loop;
+    }
+
+    @Override
+    public void open(Map<String, Object> conf, TopologyContext context, SpoutOutputCollector collector) {
+        this.collector = collector;
+        this.replayQueue = new LinkedBlockingQueue<>();
+        try {
+            String absolutePath = System.getProperty("user.dir") + File.separator + fileName;
+            System.out.println(">> [FileSpout] 打开数据文件成功，文件地址为： " + absolutePath);
+            this.raf = new RandomAccessFile(absolutePath, "r");
+        } catch (Exception e) {
+            throw new RuntimeException("无法打开数据文件: " + fileName, e);
+        }
+    }
+
+    @Override
+    public void nextTuple() {
+        try {
+            // 1. 优先重发失败的数据 (Default 策略延迟的关键来源)
+            Long replayOffset = replayQueue.poll();
+            if (replayOffset != null) {
+                sendLineAtOffset(replayOffset);
+                return;
+            }
+
+            // 2. 正常读取下一行
+            long currentOffset = raf.getFilePointer();
+            String line = raf.readLine();
+
+            if (line != null && !line.trim().isEmpty()) {
+                // 发射整行数据，附带 offset 作为 msgId
+                collector.emit(new Values(line), currentOffset);
+            } else {
+                // 读到文件末尾
+                if (loop) {
+                    raf.seek(0); // 循环读取，维持压力
+                } else {
+                    // 如果不循环，稍微休息一下避免空转 CPU 100%
+                    Thread.sleep(10);
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 回溯文件指针进行重发
+    private void sendLineAtOffset(long offset) throws IOException {
+        try {
+            long originalPos = raf.getFilePointer();
+            raf.seek(offset);
+            String line = raf.readLine();
+            if (line != null) {
+                // System.out.println("🔄 [Replay] Offset: " + offset);
+                collector.emit(new Values(line, offset), offset);
+            }
+            raf.seek(originalPos);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void ack(Object msgId) { /* 成功不处理 */ }
+
+    @Override
+    public void fail(Object msgId) {
+        if (msgId instanceof Long) {
+            replayQueue.offer((Long) msgId); // 记录失败的 Offset
+        }
+    }
+
+    @Override
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        declarer.declare(new Fields("sentence", "offset"));
+    }
+
+    @Override
+    public void close() {
+        try { if (raf != null) raf.close(); } catch (IOException e) {}
+    }
+}

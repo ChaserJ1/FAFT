@@ -29,7 +29,7 @@ public class DefaultTopologyLauncher {
 
         // 普通计数器（没有近似容错）
         builder.setBolt("count-bolt", new CountBolt(), 2)
-               .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("filteredWord"));
+               .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("word"));
 
         // 普通下沉（直接输出）
         builder.setBolt("sink-bolt", new SinkBolt(), 1)

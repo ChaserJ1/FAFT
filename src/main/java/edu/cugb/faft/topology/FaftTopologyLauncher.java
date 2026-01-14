@@ -55,7 +55,7 @@ public class FaftTopologyLauncher {
 
         // Count: 双轨计数与恢复
         builder.setBolt("faft-count-bolt", new FaftCountBolt(), 2)
-               .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("filteredWord"));
+               .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("word"));
 
         // Sink: 计算全局误差与反馈
         builder.setBolt("faft-sink-bolt", new FaftSinkBolt(), 1)

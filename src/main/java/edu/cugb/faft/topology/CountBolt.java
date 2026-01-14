@@ -25,7 +25,7 @@ public class CountBolt extends BaseRichBolt {
     }
 
     @Override public void execute(Tuple input) {
-        String w = input.getStringByField("filteredWord");
+        String w = input.getStringByField("word");
         counts.put(w, counts.getOrDefault(w, 0) + 1);
         int c = counts.get(w);
         collector.emit(input, new Values(w, c));

@@ -18,11 +18,16 @@ import static org.apache.commons.lang3.math.NumberUtils.toDouble;
 public class FaftSinkBolt extends BaseRichBolt {
     private OutputCollector collector;   // 用于 ack/fail
     private ApproxBackupManager backupManager;
-    private Map<String, Integer> result;
-
-    private double errorThreshold;
-
     private String operatorId; // 记录该算子的 componentId，供按算子采样
+    // 最终结果视图
+    private Map<String, Integer> finalRealView;
+    private Map<String, Integer> finalApproxView;
+
+    // 窗口统计
+    private int counter = 0;
+    private static final int CHECK_WINDOW = 50; // 窗口大小
+    private double errorThreshold = 0.05;
+
 
 
     @Override
@@ -31,18 +36,16 @@ public class FaftSinkBolt extends BaseRichBolt {
         this.collector = collector;
         this.operatorId = context.getThisComponentId();
         System.out.println("[FAFT BoltInit] sink componentId=" + this.operatorId);
-        this.result = new HashMap<>();
 
-        // ===============================================================
-        // 1. Zookeeper 监控初始化 (修复配置失效问题)
-        // ===============================================================
+        // 1. 初始化双轨视图 (计算 Error 必须)
+        this.finalRealView = new HashMap<>();
+        this.finalApproxView = new HashMap<>();
+
+        // 2. Zookeeper 监控初始化 (修复配置失效问题)
         String zkConnect = (String) topoConf.get("faft.zk.connect");
         if (zkConnect == null) zkConnect = "192.168.213.130:2181"; // 默认兜底
         FaftLatencyMonitor.setZkConnect(zkConnect);
 
-        // ===============================================================
-        // 2. 获取管理器单例
-        // ===============================================================
         try {
             this.backupManager = ApproxBackupManager.getInstance(); // 单例共享
         } catch (IllegalStateException e) {
@@ -54,29 +57,34 @@ public class FaftSinkBolt extends BaseRichBolt {
                     0.05   // 步长
             );
         }
+
         // 3. 接收初始采样率与重要性 (来自 Launcher 的计算结果)
-        // ===============================================================
-        Object ratios = topoConf.get("faft.ratios");
-        if (ratios instanceof Map) {
-            this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
-            System.out.println("[FAFT RatioUpdate] sink received ratios=" + ratios);
-        }
-
-        Object impObj = topoConf.get("faft.importance");
-        if (impObj instanceof Map) {
-            Map<String, String> impStrMap = (Map<String, String>) impObj;
-            Map<String, Double> impDoubleMap = new HashMap<>();
-            for (Map.Entry<String, String> e : impStrMap.entrySet()) {
-                impDoubleMap.put(e.getKey(), Double.parseDouble(e.getValue()));
+        try {
+            Object ratios = topoConf.get("faft.ratios");
+            if (ratios instanceof Map) {
+                this.backupManager.updateSamplingRatios((Map<String, Double>) ratios);
+                System.out.println("[FAFT RatioUpdate] sink received ratios=" + ratios);
             }
-            this.backupManager.updateImportance(impDoubleMap);
-            System.out.println("[FAFT ImportanceUpdate][sink] " + impDoubleMap);
+
+            Object impObj = topoConf.get("faft.importance");
+            if (impObj instanceof Map) {
+                // 增加类型转换容错
+                Map<String, String> impStrMap = (Map<String, String>) impObj;
+                Map<String, Double> impDoubleMap = new HashMap<>();
+                for (Map.Entry<String, String> e : impStrMap.entrySet()) {
+                    try {
+                        impDoubleMap.put(e.getKey(), Double.parseDouble(e.getValue().toString()));
+                    } catch(Exception ignore){}
+                }
+                this.backupManager.updateImportance(impDoubleMap);
+                System.out.println("[FAFT ImportanceUpdate][sink] " + impDoubleMap);
+            }
+        }catch (Exception e){
+            System.err.println("⚠️ [Sink] 配置读取部分失败: " + e.getMessage());
         }
 
-        // ===============================================================
-        // 4. 解析算法参数 (差异化权重 + 超参)
-        // ===============================================================
 
+        // 4. 解析算法参数 (差异化权重 + 超参)
         // 4.1 全局默认权重
         double defAlpha = getDouble(topoConf, "faft.alpha", 0.34);
         double defBeta  = getDouble(topoConf, "faft.beta", 0.33);
@@ -88,15 +96,18 @@ public class FaftSinkBolt extends BaseRichBolt {
         Map<String, NodeImportanceEvaluator.Weights> weightsObjMap = new HashMap<>();
         Object wObj = topoConf.get("faft.weights");
         if (wObj instanceof Map) {
-            Map<String, List<Double>> rawWeights = (Map<String, List<Double>>) wObj;
-            for (Map.Entry<String, List<Double>> e : rawWeights.entrySet()) {
-                List<Double> val = e.getValue();
-                if (val != null && val.size() >= 3) {
-                    weightsObjMap.put(e.getKey(),
-                            new NodeImportanceEvaluator.Weights(val.get(0), val.get(1), val.get(2)));
+            try {
+                Map<String, List<Double>> rawWeights = (Map<String, List<Double>>) wObj;
+                for (Map.Entry<String, List<Double>> e : rawWeights.entrySet()) {
+                    List<Double> val = e.getValue();
+                    if (val != null && val.size() >= 3) {
+                        weightsObjMap.put(e.getKey(),
+                                new NodeImportanceEvaluator.Weights(val.get(0), val.get(1), val.get(2)));
+                    }
                 }
-            }
+            } catch (Exception e) { System.err.println("⚠️ 权重解析警告: " + e.getMessage()); }
         }
+
 
         // 4.3 其他算法超参
         double impactDelta = getDouble(topoConf, "faft.impact.delta", 0.9);
@@ -107,11 +118,14 @@ public class FaftSinkBolt extends BaseRichBolt {
         this.errorThreshold = getDouble(topoConf, "faft.error.threshold", 0.05);
         System.out.println("[FAFT Config] Loaded errorThreshold: " + this.errorThreshold);
 
-        // ===============================================================
+
         // 5. 准备 DAG & 启动动态重算
-        // ===============================================================
-        Map<String, List<String>> dag = (Map<String, List<String>>) topoConf.get("faft.dag");
-        List<String> sinkList = (List<String>) topoConf.get("faft.sinks");
+        Map<String, List<String>> dag = null;
+        List<String> sinkList = null;
+        try {
+            dag = (Map<String, List<String>>) topoConf.get("faft.dag");
+            sinkList = (List<String>) topoConf.get("faft.sinks");
+        } catch (Exception e) {}
 
         // 简单的本地兜底，防止 Config 读取失败导致空指针
         if (dag == null || dag.isEmpty()) {
@@ -124,7 +138,6 @@ public class FaftSinkBolt extends BaseRichBolt {
             dag.put("chaos-bolt",     List.of("faft-count-bolt"));
             dag.put("faft-count-bolt", List.of("faft-sink-bolt"));
             dag.put("faft-sink-bolt", List.of());
-
             sinkList = List.of("faft-sink-bolt");
         }
         // 二次检查
@@ -145,37 +158,62 @@ public class FaftSinkBolt extends BaseRichBolt {
 
 
     @Override
-    public void execute(Tuple tuple) {
-        String word = tuple.getStringByField("word");
-        int count = tuple.getIntegerByField("count");
-        result.put(word, count);
+    public void execute(Tuple input) {
+        try{
+            String word = input.getStringByField("word");
+            int count = input.getIntegerByField("count");
+            String type = input.getStringByField("type");
+            // 1. 更新双轨视图
+            if ("TYPE_REAL".equals(type)) {
+                finalRealView.put(word, count);
+            } else {
+                finalApproxView.put(word, count);
+            }
 
-        // 1. 获取上帝视角的真值
-        int realCount = GlobalTruth.getRealCount(word);
+            // 2. 窗口聚合
+            counter++;
+            if (counter >= CHECK_WINDOW) {
+                calculateAndAdjust();
+                counter = 0;
+            }
+            collector.ack(input);
+        } catch (Exception e) {
+            collector.ack(input);
+        }
+    }
 
-        // 2. 计算相对误差
-        double currentError = 0.0;
-        if (realCount > 0) {
-            currentError = Math.abs((double)realCount - count) / realCount;
+    // 计算全局误差并触发调节
+    private void calculateAndAdjust() {
+        if (finalRealView.isEmpty()) return;
+
+        double totalRelativeError = 0.0;
+        int items = 0;
+
+        for (Map.Entry<String, Integer> entry : finalRealView.entrySet()) {
+            String key = entry.getKey();
+            double realVal = entry.getValue();
+            double approxVal = finalApproxView.getOrDefault(key, 0);
+
+            if (realVal > 0) {
+                double err = Math.abs(realVal - approxVal) / realVal;
+                totalRelativeError += err;
+                items++;
+            }
         }
 
-        // 3. 打印观测日志，随机打几条看看情况
-        if (Math.random() < 0.001) {
-            System.out.printf(">> [FAFT-Feedback] ID:%s | Approx:%d | Real:%d | Err:%.2f%%%n",
-                    word, count, realCount, currentError * 100);
+        double mre = (items == 0) ? 0 : totalRelativeError / items;
+
+        String status = "✅";
+        if (mre > 0) status = "⚠️";
+        if (mre > errorThreshold) status = "❌";
+
+        System.out.printf("%s [Global Error] Items=%d | MRE=%.4f%% (Th=%.2f%%)\n",
+                status, items, mre * 100, errorThreshold * 100);
+
+        // ✅ 核心闭环：根据计算出的 MRE，调用 Manager 调整采样率
+        if (backupManager != null) {
+            backupManager.adjustByError(mre, errorThreshold);
         }
-
-        // 4. 调用核心算法进行反馈调节
-        backupManager.adjustByError(currentError, this.errorThreshold);
-
-        // 5. 执行备份逻辑
-        backupManager.tryBackup(operatorId, new HashMap<>(result)); // 注意这里如果有性能问题以后再改
-
-        // 6. 记录恢复延迟监控
-        FaftLatencyMonitor.checkAndRecordRecovery();
-
-        collector.ack(tuple);
-
     }
 
     @Override

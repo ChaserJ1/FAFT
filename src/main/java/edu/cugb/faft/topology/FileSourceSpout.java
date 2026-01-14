@@ -19,7 +19,7 @@ public class FileSourceSpout extends BaseRichSpout {
     private String fileName;
     private boolean loop;
 
-    // 重发队列：存储处理失败需要重发的 offset
+    // 重发队列：存储处理失败需要重发的 offset, 保基准流的可靠性
     private LinkedBlockingQueue<Long> replayQueue;
 
     public FileSourceSpout(String fileName, boolean loop) {
@@ -32,7 +32,10 @@ public class FileSourceSpout extends BaseRichSpout {
         this.collector = collector;
         this.replayQueue = new LinkedBlockingQueue<>();
         try {
-            String absolutePath = System.getProperty("user.dir") + File.separator + fileName;
+            // 这里兼容一下，防止路径拼接出错
+            File f = new File(fileName);
+            String absolutePath = f.isAbsolute() ? fileName : System.getProperty("user.dir") + File.separator + fileName;
+
             System.out.println(">> [FileSpout] 打开数据文件成功，文件地址为： " + absolutePath);
             this.raf = new RandomAccessFile(absolutePath, "r");
         } catch (Exception e) {
@@ -43,7 +46,7 @@ public class FileSourceSpout extends BaseRichSpout {
     @Override
     public void nextTuple() {
         try {
-            // 1. 优先重发失败的数据 (Default 策略延迟的关键来源)
+            // 1. 优先重发失败的数据 (保证基准流不丢数据)
             Long replayOffset = replayQueue.poll();
             if (replayOffset != null) {
                 sendLineAtOffset(replayOffset);
@@ -62,7 +65,7 @@ public class FileSourceSpout extends BaseRichSpout {
                 if (loop) {
                     raf.seek(0); // 循环读取，维持压力
                 } else {
-                    // 如果不循环，稍微休息一下避免空转 CPU 100%
+                    // 如果不循环，稍微休息一下避免空转 CPU 100%+
                     Thread.sleep(10);
                 }
             }
@@ -74,14 +77,14 @@ public class FileSourceSpout extends BaseRichSpout {
     // 回溯文件指针进行重发
     private void sendLineAtOffset(long offset) throws IOException {
         try {
-            long originalPos = raf.getFilePointer();
+            long originalPos = raf.getFilePointer(); // 记录当前读到的位置
             raf.seek(offset);
             String line = raf.readLine();
             if (line != null) {
-                // System.out.println("🔄 [Replay] Offset: " + offset);
-                collector.emit(new Values(line, offset), offset);
+                System.out.println("🔄 [Replay] Offset: " + offset);
+                collector.emit(new Values(line), offset);
             }
-            raf.seek(originalPos);
+            raf.seek(originalPos); // 恢复到原来的位置继续读
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -92,14 +95,16 @@ public class FileSourceSpout extends BaseRichSpout {
 
     @Override
     public void fail(Object msgId) {
+        // 只有当基准流真的处理失败，或者 ChaosBolt 决定不欺骗而是真的让 Spout 重发时会触发
+        // 在目前的双轨制设计中，这主要用于保障基准流的绝对可靠性
         if (msgId instanceof Long) {
-            replayQueue.offer((Long) msgId); // 记录失败的 Offset
+            replayQueue.offer((Long) msgId); // // 加入重发队列
         }
     }
 
     @Override
     public void declareOutputFields(OutputFieldsDeclarer declarer) {
-        declarer.declare(new Fields("sentence", "offset"));
+        declarer.declare(new Fields("sentence"));
     }
 
     @Override

@@ -49,6 +49,9 @@ public class ApproxBackupManager {
     // 动态重算循环
     private final AtomicBoolean rebalanceStarted = new AtomicBoolean(false);
 
+    // 模拟远程状态存储 (KV Store) - 本地调试使用。 todo：后续上集群需修改至redis
+    private final ConcurrentHashMap<String, Map<String, Integer>> remoteStateStore = new ConcurrentHashMap<>();
+
     // 定期重算各个算子的重要性以及采样率
     private final ScheduledExecutorService rebalanceExec =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -85,7 +88,7 @@ public class ApproxBackupManager {
      *
      * @param operatorId 算子id，用于从表中查找对应的采样率
      * @param state 算子状态信息，当前未使用但保留用于后续扩展
-     */
+     *//*
     public void tryBackup(String operatorId, Map<String, Integer> state) {
         // 更新采样计数器
         processedCount++;
@@ -101,6 +104,37 @@ public class ApproxBackupManager {
                     operatorId, r, processedCount, backupCount);
             // TODO: 真正的备份逻辑（落盘/远端等）
         }
+    }*/
+
+    /**
+     * 具体的备份逻辑 (FaftCountBolt 调用)
+     * @param operatorId 算子ID
+     * @param word       单词
+     * @param count      计数值
+     */
+    public void tryBackup(String operatorId, String word, int count) {
+        processedCount++;
+        if (operatorId != null) processedByOp.merge(operatorId, 1L, Long::sum);
+
+        double r = getRatioFor(operatorId);
+
+        // 采样判断
+        if (random.nextDouble() < r) {
+            backupCount++;
+            // 存入模拟的远程存储
+            remoteStateStore.computeIfAbsent(operatorId, k -> new ConcurrentHashMap<>())
+                    .put(word, count);
+        }
+    }
+
+    /**
+     * 获取备份 (用于故障恢复)
+     */
+    public Map<String, Integer> getBackup(String operatorId) {
+        Map<String, Integer> data = remoteStateStore.get(operatorId);
+        if (data == null) return new HashMap<>();
+        // 返回拷贝，防止并发修改
+        return new HashMap<>(data);
     }
 
 

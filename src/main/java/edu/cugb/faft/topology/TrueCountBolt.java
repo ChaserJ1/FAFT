@@ -1,5 +1,6 @@
 package edu.cugb.faft.topology;
 
+import edu.cugb.faft.monitor.GlobalTruth;
 import org.apache.storm.topology.base.BaseRichBolt;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
@@ -27,12 +28,15 @@ public class TrueCountBolt extends BaseRichBolt {
 
     @Override
     public void execute(Tuple input) {
+        // SplitBolt 发射的字段名是 "word" (即 TaxiID)
         String word = input.getStringByField("word");
         Long offset = input.getLongByField("offset");
 
         // 核心：Offset 去重，防止故障重发污染真值
         if (!processedOffsets.contains(offset)) {
             processedOffsets.add(offset);
+            // 更新全局真值
+            GlobalTruth.update(word);
 
             int count = trueCounts.getOrDefault(word, 0) + 1;
             trueCounts.put(word, count);
@@ -41,6 +45,7 @@ public class TrueCountBolt extends BaseRichBolt {
             // streamId 使用默认流即可，下游根据 sourceComponent 区分
             collector.emit(input, new Values(word, count));
         }
+
         collector.ack(input);
 
         // 简单清理防止内存泄漏

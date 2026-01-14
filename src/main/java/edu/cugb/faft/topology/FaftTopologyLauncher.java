@@ -38,27 +38,26 @@ public class FaftTopologyLauncher {
         // 数据流向： Source -> Split -> filter -> Chaos -> Count -> Sink
         TopologyBuilder builder = new TopologyBuilder();
 
-        // 数据源 Spout
-        builder.setSpout("source-spout", new FileSourceSpout("faft.txt", true), 1);
+        // Spout: 读取文件
+        builder.setSpout("source-spout", new FileSourceSpout("faft1.txt", true), 1);
 
-        // 预处理，解析id
+        // Split: 分流 (真轨和近似轨)
         builder.setBolt("split-bolt", new SplitBolt(), 2)
                .shuffleGrouping("source-spout");
 
-        // =================== 近似计算 FAFT =====================
-        // 过滤停用词
+        // Filter: 简单过滤 (双轨都过)
         builder.setBolt("filter-bolt", new FilterBolt(), 2)
                .shuffleGrouping("split-bolt");
 
-        // 故障注入
+        // Chaos: 故障注入, 只处理实验轨
         builder.setBolt("chaos-bolt", new ChaosBolt(0.05, 0.05, 50), 2)
                 .shuffleGrouping("filter-bolt");
 
-        // 近似容错计数器
+        // Count: 双轨计数与恢复
         builder.setBolt("faft-count-bolt", new FaftCountBolt(), 2)
                .fieldsGrouping("chaos-bolt", new org.apache.storm.tuple.Fields("filteredWord"));
 
-        // 下沉，误差反馈调节
+        // Sink: 计算全局误差与反馈
         builder.setBolt("faft-sink-bolt", new FaftSinkBolt(), 1)
                .globalGrouping("faft-count-bolt");
 
@@ -195,6 +194,9 @@ public class FaftTopologyLauncher {
 
         System.out.println("[FAFT Init] 初始重要性 importance =" + importanceStr);
 
+
+
+
         // 3. 根据运行模式提交
         if (args != null && args.length > 0) {
             // 集群模式
@@ -206,11 +208,19 @@ public class FaftTopologyLauncher {
             }
         } else {
             // 本地模式，方便调试
+            System.out.println("Wait for local cluster...");
             LocalCluster cluster = new LocalCluster();
             cluster.submitTopology("faft-topology-local", conf, builder.createTopology());
-            Thread.sleep(30000);  // 跑 30 秒
-            cluster.killTopology("faft-topology-local");
-            cluster.shutdown();
+            System.out.println("✅ 实验已启动！正在运行中...");
+            System.out.println("👉 程序正处于死循环保活状态。如需结束，请手动点击 IDEA 红色停止按钮。");
+            while (true) {
+                try {
+                    Thread.sleep(10000); // 每10秒醒一次，不占CPU
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                    break;
+                }
+            }
         }
     }
 

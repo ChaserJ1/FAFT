@@ -17,9 +17,8 @@ public class FaftLatencyMonitor {
     private static final String FAILURE_PATH = "/faft/experiment/failure_time";
     // 恢复时间读取路径
     private static final String RECOVERY_PATH = "/faft/experiment/recovery_time";
-    //zookeeper所在机器ip地址
-    private static String ZK_CONN_STRING = "192.168.213.130:2181";
-
+    // 默认值，会被 setZkConnect 覆盖，zookeeper所在机器ip地址
+    private static String ZK_CONN_STRING = "192.168.213.130:2181,192.168.213.131:2181,192.168.213.132:2181";
 
     public static synchronized void setZkConnect(String connectString) {
         if (connectString != null && !connectString.isEmpty()) {
@@ -30,9 +29,15 @@ public class FaftLatencyMonitor {
     // 初始化 Zookeeper 客户端
     public static synchronized void init() {
         if (client == null) {
-            client = CuratorFrameworkFactory.newClient(
-                    ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
-            client.start();
+            try {
+                client = CuratorFrameworkFactory.newClient(
+                        ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
+                client.start();
+            } catch (Throwable t) {
+                // 捕获所有错误，包括 NoClassDefFoundError
+                System.err.println("❌ [Monitor] ZK客户端初始化失败: " + t.getMessage());
+                client = null;
+            }
         }
     }
 
@@ -40,21 +45,26 @@ public class FaftLatencyMonitor {
     public static void recordFailure() {
         try {
             init();
+            if (client == null) return;
+
             long now = System.currentTimeMillis();
+
             if (client.checkExists().forPath(FAILURE_PATH) == null) {
-                client.create().creatingParentsIfNeeded()
+                client.create()
+                        .creatingParentsIfNeeded()
                         .withMode(CreateMode.PERSISTENT)
                         .forPath(FAILURE_PATH, String.valueOf(now).getBytes());
             } else {
                 client.setData().forPath(FAILURE_PATH, String.valueOf(now).getBytes());
             }
             // 清除之前的恢复记录，为本次实验做准备
-            if (client.checkExists().forPath(RECOVERY_PATH) != null) {
+            try {
                 client.delete().forPath(RECOVERY_PATH);
+            } catch (Exception ignored) {
             }
-            System.out.println("[EXP-METRIC] Faft failure has been recorded");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            System.out.println("[EXP-METRIC] Faft 故障时间已记录：" + now);
+        } catch (Throwable t) {
+            System.err.println("⚠️ [Monitor] 记录故障时发生错误 (已忽略): " + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
     }
 
@@ -62,6 +72,7 @@ public class FaftLatencyMonitor {
     public static void checkAndRecordRecovery() {
         try {
             init();
+            if (client == null) return;
             // 只有当检测到有“故障发生”且“尚未记录恢复”时，才记录当前时间
             if (client.checkExists().forPath(FAILURE_PATH) != null &&
                     client.checkExists().forPath(RECOVERY_PATH) == null) {
@@ -76,14 +87,14 @@ public class FaftLatencyMonitor {
                     try {
                         client.create().withMode(CreateMode.PERSISTENT).forPath(RECOVERY_PATH, String.valueOf(now).getBytes());
                         long latency = now - failTime;
-                        System.out.println(">>>>>>>> [EXP-RESULT] RECOVERY LATENCY: " + latency + " ms <<<<<<<<");
+                        System.out.println(">>>>>>>> [EXP-RESULT] Faft恢复耗时：: " + latency + " ms <<<<<<<<");
                     } catch (Exception ignored) {
                         // 节点已存在，说明其他并发线程（或其他Sink实例）已经记录了，忽略
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Throwable t) {
+            // 这里不打印日志了，避免刷屏，静默失败即可
         }
     }
 

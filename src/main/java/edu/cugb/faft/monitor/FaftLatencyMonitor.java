@@ -19,6 +19,9 @@ public class FaftLatencyMonitor {
     private static final String RECOVERY_PATH = "/faft/experiment/recovery_time";
     // 默认值，会被 setZkConnect 覆盖，zookeeper所在机器ip地址
     private static String ZK_CONN_STRING = "192.168.213.130:2181,192.168.213.131:2181,192.168.213.132:2181";
+    // 尝试时间，做zk连不上的熔断降级
+    private static long lastInitAttemptTime = 0;
+    private static final long INIT_COOLDOWN_MS = 10000; // 10秒冷却
 
     public static synchronized void setZkConnect(String connectString) {
         if (connectString != null && !connectString.isEmpty()) {
@@ -28,16 +31,28 @@ public class FaftLatencyMonitor {
 
     // 初始化 Zookeeper 客户端
     public static synchronized void init() {
-        if (client == null) {
-            try {
-                client = CuratorFrameworkFactory.newClient(
-                        ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
-                client.start();
-            } catch (Throwable t) {
-                // 捕获所有错误，包括 NoClassDefFoundError
-                System.err.println("❌ [Monitor] ZK客户端初始化失败: " + t.getMessage());
-                client = null;
+        if (client != null) return;
+
+        // 如果距离上次失败不到 10秒，直接跳过，不再尝试连接
+        long now = System.currentTimeMillis();
+        if (now - lastInitAttemptTime < INIT_COOLDOWN_MS) {
+            return;
+        }
+
+        lastInitAttemptTime = now; // 更新尝试时间
+
+        try {
+            client = CuratorFrameworkFactory.newClient(
+                    ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
+            client.start();
+            // 简单测试一下连接，如果连不上直接抛异常，走 catch 逻辑
+            client.checkExists().forPath("/");
+        } catch (Throwable t) {
+            System.err.println("❌ [Monitor] ZK 连接失败，进入冷却模式 (10s): " + t.getMessage());
+            if (client != null) {
+                client.close(); // 记得关闭资源！
             }
+            client = null;
         }
     }
 

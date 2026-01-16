@@ -42,15 +42,29 @@ public class FaftLatencyMonitor {
         lastInitAttemptTime = now; // 更新尝试时间
 
         try {
-            client = CuratorFrameworkFactory.newClient(
+
+            // 🔥 核心修改：设置极短的连接超时 (500ms)
+            // 这样即使 ZK 没开，也只卡顿 0.5秒，不会导致 Storm 30秒超时
+            client = CuratorFrameworkFactory.builder()
+                    .connectString(ZK_CONN_STRING)
+                    .retryPolicy(new ExponentialBackoffRetry(1000, 3))
+                    .connectionTimeoutMs(500) // 500ms 连不上就放弃
+                    .sessionTimeoutMs(1000)
+                    .build();
+
+            client.start();
+            // 立即检测，如果失败会抛出异常，进入 catch
+            client.checkExists().forPath("/");
+            /*client = CuratorFrameworkFactory.newClient(
                     ZK_CONN_STRING, new ExponentialBackoffRetry(1000, 3));
             client.start();
             // 简单测试一下连接，如果连不上直接抛异常，走 catch 逻辑
-            client.checkExists().forPath("/");
+            client.checkExists().forPath("/");*/
         } catch (Throwable t) {
-            System.err.println("❌ [Monitor] ZK 连接失败，进入冷却模式 (10s): " + t.getMessage());
+            System.err.println("❌ [Monitor] ZK 连接失败 (已放弃): " + t.getMessage());
+            // 必须关闭资源，防止线程泄漏
             if (client != null) {
-                client.close(); // 记得关闭资源！
+                try { client.close(); } catch (Exception ignored) {}
             }
             client = null;
         }

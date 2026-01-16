@@ -60,6 +60,10 @@ public class FileSourceSpout extends BaseRichSpout {
             if (line != null && !line.trim().isEmpty()) {
                 // 发射整行数据，附带 offset 作为 msgId
                 collector.emit(new Values(line), currentOffset);
+
+                // 限流控制：每发送一条睡 1 毫秒
+                // 将 TPS 限制在 1000 左右，防止本地模式下瞬间吞吐量过大导致内存溢出(OOM)或系统崩溃
+                try { Thread.sleep(1); } catch (InterruptedException e) {}
             } else {
                 // 读到文件末尾
                 if (loop) {
@@ -81,7 +85,7 @@ public class FileSourceSpout extends BaseRichSpout {
             raf.seek(offset);
             String line = raf.readLine();
             if (line != null) {
-                System.out.println("🔄 [Replay] Offset: " + offset);
+                // System.out.println("🔄 [Replay] Offset: " + offset);
                 collector.emit(new Values(line), offset);
             }
             raf.seek(originalPos); // 恢复到原来的位置继续读

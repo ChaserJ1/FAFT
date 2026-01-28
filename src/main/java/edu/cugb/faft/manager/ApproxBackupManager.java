@@ -156,29 +156,72 @@ public class ApproxBackupManager {
      */
     public synchronized void adjustByError(double Eobs, double Emax) {
         double lower = 0.5 * Emax;      // 滞回下界
-        double s = Math.max(0.01, step); // 用 step 作为缩放步长，最低 1%
-        if (Eobs > Emax) {
-            // 上调：只调 Top 30% 重要算子
-            List<String> topOps = topKByImportance(true, 0.3);
-            for (String op : topOps) {
+
+        // 1. 获取所有算子条目，准备排序
+        List<Map.Entry<String, Double>> sortedOps = new ArrayList<>(importanceMap.entrySet());
+
+        // 2. 计算本轮目标调整多少个算子
+        int targetCount = Math.max(1, (int) (sortedOps.size() * 0.3));
+        int adjustedCount = 0;
+
+        if (Eobs > Emax) { // 误差过大，执行上调
+
+            sortedOps.sort((a, b) -> Double.compare(b.getValue(), a.getValue())); // 降序排列
+
+            for (Map.Entry<String, Double> entry : sortedOps) {
+                String op = entry.getKey();
                 double oldR = ratioByOperator.getOrDefault(op, currentRatio);
+
+                // 如果该算子已经满载 (接近 1.0)，则跳过
+                // 避免死锁在 split-bolt 上，让机会流向 chaos-bolt 等低采样节点
+                if (oldR >= rmax - 0.001) {
+                    continue;
+                }
+
+                // 执行上调
                 double newR = clamp(oldR + step);
                 ratioByOperator.put(op, newR);
+
                 System.out.printf("[FAFT Adjust][LOCAL-UP] op=%s oldR=%.3f newR=%.3f (error=%.4f > %.4f)%n",
                         op, oldR, newR, Eobs, Emax);
+
+                adjustedCount++;
+                // 如果已经调够了目标数量，就结束本轮调节
+                if (adjustedCount >= targetCount) break;
             }
-        } else if (Eobs < lower) {
-            // 下调：只调 Bottom 30% 重要算子
-            List<String> lowOps = topKByImportance(false, 0.3);
-            for (String op : lowOps) {
+
+            if (adjustedCount == 0) {
+                System.out.println("[FAFT Adjust] ⚠️ 警告：系统全员满载(1.0)，无法进一步降低误差！");
+            }
+
+        } else if (Eobs < lower) { // 误差过小，执行下调
+
+            // 策略：按重要性从低到高排序 (优先牺牲不重要的节点)
+            sortedOps.sort((a, b) -> Double.compare(a.getValue(), b.getValue())); // 升序
+
+            for (Map.Entry<String, Double> entry : sortedOps) {
+                String op = entry.getKey();
                 double oldR = ratioByOperator.getOrDefault(op, currentRatio);
+
+                // 如果该算子已经触底 (接近 0.1)，则跳过
+                if (oldR <= rmin + 0.001) {
+                    continue;
+                }
+
+                // 执行下调
                 double newR = clamp(oldR - step);
                 ratioByOperator.put(op, newR);
+
                 System.out.printf("[FAFT Adjust][LOCAL-DOWN] op=%s oldR=%.3f newR=%.3f (error=%.4f < %.4f)%n",
                         op, oldR, newR, Eobs, lower);
+
+                adjustedCount++;
+                if (adjustedCount >= targetCount) break;
             }
         }
     }
+
+
     /**
      * 获得 Top/Bottom K 算子列表
      * @param highFirst 低分(false)/高分(true)优先

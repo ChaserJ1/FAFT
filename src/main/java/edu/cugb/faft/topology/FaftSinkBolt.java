@@ -25,7 +25,7 @@ public class FaftSinkBolt extends BaseRichBolt {
 
     // 窗口统计
     private int counter = 0;
-    private static final int CHECK_WINDOW = 50; // 窗口大小
+    private static final int CHECK_WINDOW = 1000; // 窗口大小
     private double errorThreshold = 0.05;
 
 
@@ -210,10 +210,17 @@ public class FaftSinkBolt extends BaseRichBolt {
         System.out.printf("%s [Global Error] Items=%d | MRE=%.4f%% (Th=%.2f%%)\n",
                 status, items, mre * 100, errorThreshold * 100);
 
-        // ✅ 核心闭环：根据计算出的 MRE，调用 Manager 调整采样率
+        // 核心闭环：根据计算出的 MRE，调用 Manager 调整采样率
         if (backupManager != null) {
             backupManager.adjustByError(mre, errorThreshold);
         }
+
+        // 计算完一轮后，清空视图！
+        // 这样下一次计算的就是“当前窗口”的纯净误差，不包含历史旧账
+        // 也能防止 Map 无限膨胀导致 OOM
+        finalRealView.clear();
+        finalApproxView.clear();
+
     }
 
     @Override

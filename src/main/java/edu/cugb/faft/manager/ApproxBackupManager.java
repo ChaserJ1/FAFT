@@ -1,11 +1,16 @@
 package edu.cugb.faft.manager;
 
 import edu.cugb.faft.importance.NodeImportanceEvaluator;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
 
+import java.io.Serializable;
 import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 近似备份管理器（支持“按算子采样率 + 局部调节”）
@@ -13,19 +18,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - importanceMap  ：每算子重要性分数（来自评估器）
  * - adjustByError  ：当误差超阈值时，仅对“重要算子 Top P%”做上调；当误差远低于阈值时，对“低重要性算子 Bottom P%”做温和下调
  */
-public class ApproxBackupManager {
+public class ApproxBackupManager implements Serializable {
+    private static final long serialVersionUID = 1L;
 
     //单例模式
     private static volatile ApproxBackupManager INSTANCE;
-    public static synchronized ApproxBackupManager init(double initRatio, double rmin, double rmax, double step) {
-        if (INSTANCE != null) return INSTANCE;
-        INSTANCE = new ApproxBackupManager(initRatio, rmin, rmax, step);
-        return INSTANCE;
-    }
-    public static ApproxBackupManager getInstance() {
-        if (INSTANCE == null) throw new IllegalStateException("ApproxBackupManager not initialized");
-        return INSTANCE;
-    }
+
+    // Redis 连接池 (不可序列化，必须标记为 transient)
+    private transient JedisPool jedisPool;
+
+    // 资源开销埋点计数器 (原子类实现了 Serializable)
+    private final AtomicLong ioCounter = new AtomicLong(0);
 
     // 配置与状态
     private final Random random = new Random();
@@ -49,16 +52,31 @@ public class ApproxBackupManager {
     // 动态重算循环
     private final AtomicBoolean rebalanceStarted = new AtomicBoolean(false);
 
-    // 模拟远程状态存储 (KV Store) - 本地调试使用。 todo：后续上集群需修改至redis
-    private final ConcurrentHashMap<String, Map<String, Integer>> remoteStateStore = new ConcurrentHashMap<>();
+    // 线程池 (不可序列化，transient，需在 readResolve 中重建或懒加载)
+    private transient ScheduledExecutorService rebalanceExec;
 
-    // 定期重算各个算子的重要性以及采样率
+    // 已完成，采用redis
+/*    // 模拟远程状态存储 (KV Store) - 本地调试使用。 todo：后续上集群需修改至redis
+    private final ConcurrentHashMap<String, Map<String, Integer>> remoteStateStore = new ConcurrentHashMap<>();*/
+
+    // 放在初始化过程中了
+/*    // 定期重算各个算子的重要性以及采样率
     private final ScheduledExecutorService rebalanceExec =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "faft-rebalancer");
                 t.setDaemon(true);
                 return t;
-            });
+            });*/
+
+    public static synchronized ApproxBackupManager init(double initRatio, double rmin, double rmax, double step) {
+        if (INSTANCE != null) return INSTANCE;
+        INSTANCE = new ApproxBackupManager(initRatio, rmin, rmax, step);
+        return INSTANCE;
+    }
+    public static ApproxBackupManager getInstance() {
+        if (INSTANCE == null) throw new IllegalStateException("ApproxBackupManager not initialized");
+        return INSTANCE;
+    }
 
     // 构造函数
     private ApproxBackupManager(double initRatio, double rmin, double rmax, double step) {
@@ -66,6 +84,42 @@ public class ApproxBackupManager {
         this.rmin = rmin;
         this.rmax = rmax;
         this.step = step;
+
+        // 初始化 transient 字段
+        initTransientFields();
+    }
+
+    // 专门用于初始化不可序列化的字段 (Redis, ThreadPool)
+    private void initTransientFields() {
+        // 1. 初始化 Redis 连接池
+        if (this.jedisPool == null) {
+            JedisPoolConfig poolConfig = new JedisPoolConfig();
+            poolConfig.setMaxTotal(50);
+            poolConfig.setMaxIdle(10);
+            poolConfig.setTestOnBorrow(true);
+
+            // 集群配置
+            this.jedisPool = new JedisPool(poolConfig, "192.168.213.130", 6379);
+            System.out.println("[FAFT] Redis Pool Initialized.");
+        }
+
+        // 2. 初始化重平衡线程池
+        if (this.rebalanceExec == null) {
+            this.rebalanceExec = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "faft-rebalancer");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+    }
+
+    // Java 序列化钩子：反序列化时调用，确保 transient 字段被重新初始化
+    private Object readResolve() {
+        if (INSTANCE == null) {
+            INSTANCE = this;
+        }
+        INSTANCE.initTransientFields();
+        return INSTANCE;
     }
 
     // 用传来的采样率更新整张 per-op 采样率表
@@ -107,12 +161,12 @@ public class ApproxBackupManager {
     }*/
 
     /**
-     * 具体的备份逻辑 (FaftCountBolt 调用)
+     * 具体的备份逻辑 (FaftCountBolt 调用) 写 redis
      * @param operatorId 算子ID
      * @param word       单词
      * @param count      计数值
      */
-    public void tryBackup(String operatorId, String word, int count) {
+    public void tryBackup(String operatorId, int taskId, String word, int count) {
         processedCount++;
         if (operatorId != null) processedByOp.merge(operatorId, 1L, Long::sum);
 
@@ -121,20 +175,48 @@ public class ApproxBackupManager {
         // 采样判断
         if (random.nextDouble() < r) {
             backupCount++;
-            // 存入模拟的远程存储
-            remoteStateStore.computeIfAbsent(operatorId, k -> new ConcurrentHashMap<>())
-                    .put(word, count);
+
+            // 埋点：I/O 计数 +1
+            long currentIO = ioCounter.incrementAndGet();
+            if (currentIO % 1000 == 0) {
+                // [实验数据] 打印 I/O 开销
+                System.out.println("[EXP-METRIC] Type=RESOURCE_IO_OPS TotalCount=" + currentIO + " TS=" + System.currentTimeMillis());
+            }
+
+            // 写 Redis (确保连接池已初始化)
+            if (jedisPool == null) initTransientFields();
+            try (Jedis jedis = jedisPool.getResource()) {
+                // Key 格式: FAFT:BACKUP:{ComponentId}:{TaskId}
+                String key = "FAFT:BACKUP:" + operatorId + ":" + taskId;
+                jedis.hset(key, word, String.valueOf(count));
+                jedis.expire(key, 3600); // 1小时过期
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 
     /**
-     * 获取备份 (用于故障恢复)
+     * 恢复备份 (用于故障恢复), 读 redis
      */
-    public Map<String, Integer> getBackup(String operatorId) {
-        Map<String, Integer> data = remoteStateStore.get(operatorId);
-        if (data == null) return new HashMap<>();
-        // 返回拷贝，防止并发修改
-        return new HashMap<>(data);
+    public Map<String, Integer> getBackup(String operatorId, int taskId) {
+        Map<String, Integer> result = new HashMap<>();
+        String key = "FAFT:BACKUP:" + operatorId + ":" + taskId;
+
+        if (jedisPool == null) initTransientFields();
+        try (Jedis jedis = jedisPool.getResource()) {
+            if (jedis.exists(key)) {
+                Map<String, String> rawData = jedis.hgetAll(key);
+                for (Map.Entry<String, String> entry : rawData.entrySet()) {
+                    try {
+                        result.put(entry.getKey(), Integer.parseInt(entry.getValue()));
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
     }
 
 

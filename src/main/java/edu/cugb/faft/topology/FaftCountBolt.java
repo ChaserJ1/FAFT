@@ -18,6 +18,8 @@ public class FaftCountBolt extends BaseRichBolt {
     private ApproxBackupManager backupManager;
     private String componentId;
 
+    private int taskId; // 集群中区分不同实例
+
     // 双轨状态隔离
     private Map<String, Integer> realCounts;   // 真值 (Ground Truth, 永不丢失)
     private Map<String, Integer> approxCounts; // 实验值 (会崩, 靠备份恢复)
@@ -26,6 +28,7 @@ public class FaftCountBolt extends BaseRichBolt {
     public void prepare(Map<String, Object> topoConf, TopologyContext context, OutputCollector collector) {
         this.collector = collector;
         this.componentId = context.getThisComponentId();
+        this.taskId = context.getThisTaskId(); // 获取当前 Task ID
         this.realCounts = new HashMap<>();
         this.approxCounts = new HashMap<>();
 
@@ -100,18 +103,27 @@ public class FaftCountBolt extends BaseRichBolt {
             // ============================================
 
             // 2.1 检查崩溃信号
-            if ("FAFT_CRASH_SIGNAL".equals(word)) {
+            if ("FAFT_CRASH_SIGNAL".equals(word) || "CRASH".equals(type)) {
+                // [实验埋点] 开始计时
+                long start = System.currentTimeMillis();
                 System.out.println("[FaftCount] 收到崩溃信号！模拟内存丢失...");
+                System.out.printf("[FAFT] 接收到崩溃信号 Node %s (Task-%d) Crashing...%n", componentId, taskId);
 
                 // 1. 模拟状态丢失 (只清空近似值，不动真值)
                 this.approxCounts.clear();
 
-                // 2. 从近似备份中恢复 (Restore)
-                Map<String, Integer> backup = backupManager.getBackup(this.componentId);
-                if (backup != null && !backup.isEmpty()) {
-                    this.approxCounts.putAll(backup);
-                    System.out.println("[FaftCount] 已从近似备份恢复，恢复条目数: " + backup.size());
+                // 2. 从Redis近似备份中恢复 (Restore)
+                if (backupManager != null) {
+                    Map<String, Integer> backup = backupManager.getBackup(this.componentId, this.taskId);
+                    if (backup != null && !backup.isEmpty()) {
+                        this.approxCounts.putAll(backup);
+                        System.out.printf("[FaftCount] Task-%d Restored %d items from Redis.%n", taskId, backup.size());
+                    }
                 }
+
+                // [实验埋点] 结束计时，打印 RTO
+                long duration = System.currentTimeMillis() - start;
+                System.out.println("[EXP-METRIC] Type=RTO Time=" + duration + "ms Task=" + taskId + " TS=" + System.currentTimeMillis());
 
                 // 3. 记录恢复完成时间 (供 Monitor 计算 Latency)
                 FaftLatencyMonitor.checkAndRecordRecovery();
@@ -126,7 +138,7 @@ public class FaftCountBolt extends BaseRichBolt {
 
             // 2.3 尝试备份 (Backup Strategy)
             // 这里传入 componentId，Manager 会查找对应的采样率决定是否存储
-            backupManager.tryBackup(this.componentId, word, count);
+            backupManager.tryBackup(this.componentId, this.taskId, word, count);
 
             // 发送给 Sink: (word, count, type)
             // 告诉 Sink：这是近似计算的结果

@@ -39,7 +39,7 @@ public class FaftTopologyLauncher {
         TopologyBuilder builder = new TopologyBuilder();
 
         // Spout: 读取文件
-        builder.setSpout("source-spout", new FileSourceSpout("faft1.txt", true), 1);
+        builder.setSpout("source-spout", new FileSourceSpout("/opt/data/faft1.txt", true), 1);
 
         // Split: 分流 (真轨和近似轨)
         builder.setBolt("split-bolt", new SplitBolt(), 2)

@@ -79,8 +79,9 @@ public class ApproxBackupManager implements Serializable {
     }
 
     // 构造函数
+    // 改为初始采样率为1，防止启动前期的误差积累
     private ApproxBackupManager(double initRatio, double rmin, double rmax, double step) {
-        this.currentRatio = initRatio;
+        this.currentRatio = rmax;
         this.rmin = rmin;
         this.rmax = rmax;
         this.step = step;

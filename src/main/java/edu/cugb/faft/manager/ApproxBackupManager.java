@@ -249,6 +249,15 @@ public class ApproxBackupManager implements Serializable {
 
         if (Eobs > Emax) { // 误差过大，执行上调
 
+            // 计算动态步长
+            double Kp = 2.5; // 比例系数
+            double errorDiff = Eobs - Emax;
+            double dynamicStep = (Kp * errorDiff) + this.step; // 动态步长
+
+            // 打印 PID 触发日志
+            System.out.printf("[FAFT-PID] 误差过高 (MRE=%.2f%%), 触发激进调节! 动态步长: %.3f (原步长: %.3f)%n",
+                    Eobs * 100, dynamicStep, this.step);
+
             sortedOps.sort((a, b) -> Double.compare(b.getValue(), a.getValue())); // 降序排列
 
             for (Map.Entry<String, Double> entry : sortedOps) {
@@ -262,7 +271,7 @@ public class ApproxBackupManager implements Serializable {
                 }
 
                 // 执行上调
-                double newR = clamp(oldR + step);
+                double newR = clamp(oldR + dynamicStep);
                 ratioByOperator.put(op, newR);
 
                 System.out.printf("[FAFT Adjust][LOCAL-UP] op=%s oldR=%.3f newR=%.3f (error=%.4f > %.4f)%n",

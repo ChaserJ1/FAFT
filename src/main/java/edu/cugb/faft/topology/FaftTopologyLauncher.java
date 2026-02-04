@@ -50,7 +50,7 @@ public class FaftTopologyLauncher {
                .shuffleGrouping("split-bolt");
 
         // Chaos: 故障注入, 只处理实验轨
-        builder.setBolt("chaos-bolt", new ChaosBolt(0.01, 0.05, 50), 2)
+        builder.setBolt("chaos-bolt", new ChaosBolt(0.001, 0, 50), 2)
                 .shuffleGrouping("filter-bolt");
 
         // Count: 双轨计数与恢复
